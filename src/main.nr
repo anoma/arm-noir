@@ -16,7 +16,7 @@ global MAX_OUTPUT_LEN: u32 = 512;
 global MAX_FORWARDER_CALLDATA_LEN: u32 = 256;
 global MAX_PAYLOADS_PER_LIST: u32 = 4;
 global MAX_PAYLOAD_DATA_LEN: u32 = 256;
-global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 32768;
+global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 4257;
 
 struct Resource {
     logic_ref: [u8; 32],
@@ -45,7 +45,7 @@ impl Resource {
     }
 
     fn commit(self) -> [u8; 32] {
-        keccak256::keccak256(self.to_bytes(),  177)
+        keccak256::keccak256(self.to_bytes(), 177)
     }
 
     fn nullify(self, nk: NullifierKey) -> [u8; 32] {
@@ -256,8 +256,37 @@ fn encode_wrap_forwarder_input(
     signature_len: u32,
 ) -> ([u8; MAX_INPUT_LEN], u32) {
     let mut res = [0; MAX_INPUT_LEN];
-    // Mock encoding logic here
-    (res, 100)
+    let mut offset: u32 = 0;
+
+    for i in 0..MAX_ERC20_TOKEN_ADDR_LEN {
+        if i < erc20_token_addr_len { res[offset + i] = erc20_token_addr[i]; }
+    }
+    offset += erc20_token_addr_len;
+    // Convert u128 to 16 bytes (Big-Endian)
+    let quantity_bytes = (quantity as Field).to_be_bytes::<16>();
+    for i in 0..16 { res[offset + i] = quantity_bytes[i]; }
+    offset += 16;
+    for i in 0..MAX_PERMIT_NONCE_LEN {
+        if i < nonce_len { res[offset + i] = nonce[i]; }
+    }
+    offset += nonce_len;
+    for i in 0..MAX_PERMIT_DEADLINE_LEN {
+        if i < deadline_len { res[offset + i] = deadline[i]; }
+    }
+    offset += deadline_len;
+    for i in 0..MAX_ETH_ADDR_LEN {
+        if i < ethereum_account_addr_len { res[offset + i] = ethereum_account_addr[i]; }
+    }
+    offset += ethereum_account_addr_len;
+    for i in 0..32 {
+        res[offset + i] = action_tree_root[i];
+    }
+    offset += 32;
+    for i in 0..MAX_PERMIT_SIG_LEN {
+        if i < signature_len { res[offset + i] = signature[i]; }
+    }
+    offset += signature_len;
+    (res, offset)
 }
 
 fn encode_unwrap_forwarder_input(
@@ -268,8 +297,21 @@ fn encode_unwrap_forwarder_input(
     quantity: u128,
 ) -> ([u8; MAX_INPUT_LEN], u32) {
     let mut res = [0; MAX_INPUT_LEN];
-    // Mock encoding logic here
-    (res, 80)
+    let mut offset: u32 = 0;
+
+    for i in 0..MAX_ERC20_TOKEN_ADDR_LEN {
+        if i < erc20_token_addr_len { res[offset + i] = erc20_token_addr[i]; }
+    }
+    offset += erc20_token_addr_len;
+    for i in 0..MAX_ETH_ADDR_LEN {
+        if i < ethereum_account_addr_len { res[offset + i] = ethereum_account_addr[i]; }
+    }
+    offset += ethereum_account_addr_len;
+    // Convert u128 to 16 bytes (Big-Endian)
+    let quantity_bytes = (quantity as Field).to_be_bytes::<16>();
+    for i in 0..16 { res[offset + i] = quantity_bytes[i]; }
+    offset += 16;
+    (res, offset)
 }
 
 fn encode_forwarder_calldata(
@@ -282,8 +324,25 @@ fn encode_forwarder_calldata(
     output_len: u32,
 ) -> ([u8; MAX_FORWARDER_CALLDATA_LEN], u32) {
     let mut res = [0; MAX_FORWARDER_CALLDATA_LEN];
-    // Mock encoding logic here
-    (res, 200)
+    let mut offset: u32 = 0;
+
+    for i in 0..MAX_FORWARDER_ADDR_LEN {
+        if i < forwarder_len { res[offset + i] = forwarder[i]; }
+    }
+    offset += forwarder_len;
+    for i in 0..32 {
+        res[offset + i] = logic_hiding_bytes[i];
+    }
+    offset += 32;
+    for i in 0..MAX_INPUT_LEN {
+        if i < input_len { res[offset + i] = input[i]; }
+    }
+    offset += input_len;
+    for i in 0..MAX_OUTPUT_LEN {
+        if i < output_len { res[offset + i] = output[i]; }
+    }
+    offset += output_len;
+    (res, offset)
 }
 
 // Mock signature verification. In real Noir, use std::ecdsa_secp256k1::verify_signature.
