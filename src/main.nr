@@ -208,12 +208,12 @@ fn calculate_label_ref(
 ) -> [u8; 32] {
     let mut bytes = [0; MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN];
     for i in 0..MAX_FORWARDER_ADDR_LEN {
-        if i < forwarder_addr_len { bytes[i] = forwarder_addr[i]; }
+        bytes[i] = forwarder_addr[i];
     }
     for i in 0..MAX_ERC20_TOKEN_ADDR_LEN {
-        if i < erc20_token_addr_len { bytes[forwarder_addr_len + i] = erc20_token_addr[i]; }
+        bytes[MAX_FORWARDER_ADDR_LEN + i] = erc20_token_addr[i];
     }
-    keccak256::keccak256(bytes, forwarder_addr_len + erc20_token_addr_len)
+    keccak256::keccak256(bytes, MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN)
 }
 
 fn persistent_value_ref(
@@ -224,12 +224,12 @@ fn persistent_value_ref(
 ) -> [u8; 32] {
     let mut bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PAYLOAD_LEN];
     for i in 0..MAX_AUTH_PK_LEN {
-        if i < auth_pk_len { bytes[i] = auth_pk[i]; }
+        bytes[i] = auth_pk[i];
     }
     for i in 0..MAX_ENCRYPTION_PAYLOAD_LEN {
-        if i < encryption_payload_len { bytes[auth_pk_len + i] = encryption_payload[i]; }
+        bytes[MAX_AUTH_PK_LEN + i] = encryption_payload[i];
     }
-    keccak256::keccak256(bytes, auth_pk_len + encryption_payload_len)
+    keccak256::keccak256(bytes, MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PAYLOAD_LEN)
 }
 
 fn value_ref_from_eth_addr(ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN], len: u32) -> [u8; 32] {
@@ -548,8 +548,8 @@ fn test_main() {
             label_ref: [0; 32],
             // Pre-computed Keccak-256 hash of empty bytes to match 0-length inputs
             value_ref: [
-                197, 210, 70, 1, 134, 247, 35, 60, 146, 126, 125, 178, 220, 199, 3, 192, 
-                229, 0, 182, 83, 202, 130, 39, 59, 123, 250, 216, 4, 93, 133, 164, 112
+                201, 242, 80, 122, 186, 212, 36, 194, 132, 67, 20, 124, 121, 241, 85, 104,
+                172, 58, 218, 44, 175, 40, 12, 41, 93, 204, 12, 204, 171, 61, 6, 20
             ],
             quantity: 0,
             nonce: [0; 32],
@@ -571,8 +571,8 @@ fn test_main() {
         forwarder_info: Option::none(),
     };
     let logic_digest = [
-        233, 188, 136, 77, 76, 148, 100, 192, 120, 193, 180, 66, 224, 217, 55, 65,
-        71, 200, 165, 194, 110, 166, 225, 193, 64, 111, 53, 97, 32, 152, 109, 147
+        251, 153, 153, 15, 19, 230, 168, 227, 96, 81, 145, 231, 55, 165, 136, 25,
+        191, 33, 164, 253, 143, 42, 133, 164, 128, 127, 161, 219, 186, 209, 158, 131
     ];
 
     // Execute the main function which triggers _constrain()
