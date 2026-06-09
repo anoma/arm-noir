@@ -5,7 +5,7 @@ global MAX_FORWARDER_ADDR_LEN: u32 = 20;
 global MAX_ERC20_TOKEN_ADDR_LEN: u32 = 20;
 global MAX_ETH_ADDR_LEN: u32 = 20;
 global MAX_AUTH_PK_LEN: u32 = 65;
-global MAX_AUTH_SIG_LEN: u32 = 65;
+global MAX_AUTH_SIG_LEN: u32 = 64;
 global MAX_ENCRYPTION_PAYLOAD_LEN: u32 = 256;
 global MAX_DISCOVERY_PAYLOAD_LEN: u32 = 256;
 global MAX_PERMIT_NONCE_LEN: u32 = 32;
@@ -178,22 +178,18 @@ impl ResourceLogicInstance {
             buf_len += 4;
 
             for p_idx in 0..MAX_PAYLOADS_PER_LIST {
-                if p_idx < list_len {
-                    let p = list[p_idx];
-                    let p_len_bytes = (p.data_len as Field).to_le_bytes::<4>();
-                    for i in 0..4 { buf[buf_len + i] = p_len_bytes[i]; }
-                    buf_len += 4;
+                let p = list[p_idx];
+                let p_len_bytes = (p.data_len as Field).to_le_bytes::<4>();
+                for i in 0..4 { buf[buf_len + i] = p_len_bytes[i]; }
+                buf_len += 4;
 
-                    for i in 0..MAX_PAYLOAD_DATA_LEN {
-                        if i < p.data_len {
-                            buf[buf_len + i] = p.data[i];
-                        }
-                    }
-                    buf_len += p.data_len;
-
-                    buf[buf_len] = p.deletion_criterion as u8;
-                    buf_len += 1;
+                for i in 0..MAX_PAYLOAD_DATA_LEN {
+                    buf[buf_len + i] = p.data[i];
                 }
+                buf_len += MAX_PAYLOAD_DATA_LEN;
+
+                buf[buf_len] = p.deletion_criterion as u8;
+                buf_len += 1;
             }
         }
 
@@ -298,7 +294,16 @@ fn verify_prehash(
     sig_len: u32,
     message_hash: [u8; 32],
 ) -> bool {
-    true
+    assert(pk[0] == 0x04);
+    let mut pk_x = [0; 32];
+    for i in 0..32 {
+        pk_x[i] = pk[1+i];
+    }
+    let mut pk_y = [0; 32];
+    for i in 0..32 {
+        pk_y[i] = pk[33+i];
+    }
+    std::ecdsa_secp256k1::verify_signature(pk_x, pk_y, sig, message_hash)
 }
 
 impl TransferAuthWitness {
@@ -311,7 +316,7 @@ impl TransferAuthWitness {
         }
     }
 
-    fn _constrain(self: Self) -> ResourceLogicInstance {
+    fn _constrain(self) -> ResourceLogicInstance {
         let tag = self.tag();
         let app_data = if self.resource.is_ephemeral {
             self.ephemeral_resource_check()
@@ -427,7 +432,7 @@ impl TransferAuthWitness {
         AppData::default()
     }
 
-    fn persistent_create(self: Self) -> AppData {
+    fn persistent_create(self) -> AppData {
         let pk = self.auth_pk.unwrap();
         let payload = self.encryption_payload.unwrap();
         let label = self.label_info.unwrap();
@@ -471,10 +476,9 @@ impl TransferAuthWitness {
     }
 }
 
-fn main(witness: pub TransferAuthWitness) {
+fn main(witness: TransferAuthWitness, logic_digest: pub [u8; 32]) {
     let instance = witness._constrain();
-    //instance.logic_digest();
-    //assert(x != y);
+    assert(instance.logic_digest() == logic_digest);
 }
 
 #[test]
@@ -496,9 +500,9 @@ fn test_main() {
         is_consumed: true,
         action_root: [0; 32],
         nullifier_key: Option::some(NullifierKey { bytes: [0; 32] }),
-        auth_pk: Option::some([0; MAX_AUTH_PK_LEN]),
+        auth_pk: Option::some([0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8]),
         auth_pk_len: 0,
-        auth_sig: Option::some([0; MAX_AUTH_SIG_LEN]),
+        auth_sig: Option::some([0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98]),
         auth_sig_len: 0,
         encryption_payload: Option::some([0; MAX_ENCRYPTION_PAYLOAD_LEN]),
         encryption_payload_len: 0,
@@ -507,7 +511,11 @@ fn test_main() {
         label_info: Option::none(),
         forwarder_info: Option::none(),
     };
+    let logic_digest = [
+        233, 188, 136, 77, 76, 148, 100, 192, 120, 193, 180, 66, 224, 217, 55, 65,
+        71, 200, 165, 194, 110, 166, 225, 193, 64, 111, 53, 97, 32, 152, 109, 147
+    ];
 
     // Execute the main function which triggers _constrain()
-    main(witness);
+    main(witness, logic_digest);
 }
