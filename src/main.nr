@@ -14,9 +14,9 @@ global MAX_PERMIT_SIG_LEN: u32 = 65;
 global MAX_INPUT_LEN: u32 = 512;
 global MAX_OUTPUT_LEN: u32 = 512;
 global MAX_FORWARDER_CALLDATA_LEN: u32 = 256;
-global MAX_PAYLOADS_PER_LIST: u32 = 4;
+global MAX_PAYLOADS_PER_LIST: u32 = 1;
 global MAX_PAYLOAD_DATA_LEN: u32 = 256;
-global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 4257;
+global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1125;
 
 struct Resource {
     logic_ref: [u8; 32],
