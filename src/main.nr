@@ -17,6 +17,8 @@ global MAX_FORWARDER_CALLDATA_LEN: u32 = 256;
 global MAX_PAYLOADS_PER_LIST: u32 = 1;
 global MAX_PAYLOAD_DATA_LEN: u32 = 256;
 global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1125;
+global CALL_TYPE_WRAP: u8 = 0;
+global CALL_TYPE_UNWRAP: u8 = 1;
 
 struct Resource {
     logic_ref: [u8; 32],
@@ -82,9 +84,6 @@ struct PermitInfo {
     permit_sig: [u8; MAX_PERMIT_SIG_LEN],
     permit_sig_len: u32,
 }
-
-global CALL_TYPE_WRAP: u8 = 0;
-global CALL_TYPE_UNWRAP: u8 = 1;
 
 struct ForwarderInfo {
     call_type: u8,
@@ -235,7 +234,7 @@ fn persistent_value_ref(
 fn value_ref_from_eth_addr(ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN], len: u32) -> [u8; 32] {
     let mut value_ref = [0; 32];
     for i in 0..MAX_ETH_ADDR_LEN {
-        if i < len { value_ref[i] = ethereum_account_addr[i]; }
+        value_ref[i] = ethereum_account_addr[i];
     }
     value_ref
 }
@@ -259,33 +258,33 @@ fn encode_wrap_forwarder_input(
     let mut offset: u32 = 0;
 
     for i in 0..MAX_ERC20_TOKEN_ADDR_LEN {
-        if i < erc20_token_addr_len { res[offset + i] = erc20_token_addr[i]; }
+        res[offset + i] = erc20_token_addr[i];
     }
-    offset += erc20_token_addr_len;
+    offset += MAX_ERC20_TOKEN_ADDR_LEN;
     // Convert u128 to 16 bytes (Big-Endian)
     let quantity_bytes = (quantity as Field).to_be_bytes::<16>();
     for i in 0..16 { res[offset + i] = quantity_bytes[i]; }
     offset += 16;
     for i in 0..MAX_PERMIT_NONCE_LEN {
-        if i < nonce_len { res[offset + i] = nonce[i]; }
+        res[offset + i] = nonce[i];
     }
-    offset += nonce_len;
+    offset += MAX_PERMIT_NONCE_LEN;
     for i in 0..MAX_PERMIT_DEADLINE_LEN {
-        if i < deadline_len { res[offset + i] = deadline[i]; }
+        res[offset + i] = deadline[i];
     }
-    offset += deadline_len;
+    offset += MAX_PERMIT_DEADLINE_LEN;
     for i in 0..MAX_ETH_ADDR_LEN {
-        if i < ethereum_account_addr_len { res[offset + i] = ethereum_account_addr[i]; }
+        res[offset + i] = ethereum_account_addr[i];
     }
-    offset += ethereum_account_addr_len;
+    offset += MAX_ETH_ADDR_LEN;
     for i in 0..32 {
         res[offset + i] = action_tree_root[i];
     }
     offset += 32;
     for i in 0..MAX_PERMIT_SIG_LEN {
-        if i < signature_len { res[offset + i] = signature[i]; }
+        res[offset + i] = signature[i];
     }
-    offset += signature_len;
+    offset += MAX_PERMIT_SIG_LEN;
     (res, offset)
 }
 
@@ -300,13 +299,13 @@ fn encode_unwrap_forwarder_input(
     let mut offset: u32 = 0;
 
     for i in 0..MAX_ERC20_TOKEN_ADDR_LEN {
-        if i < erc20_token_addr_len { res[offset + i] = erc20_token_addr[i]; }
+        res[offset + i] = erc20_token_addr[i];
     }
-    offset += erc20_token_addr_len;
+    offset += MAX_ERC20_TOKEN_ADDR_LEN;
     for i in 0..MAX_ETH_ADDR_LEN {
-        if i < ethereum_account_addr_len { res[offset + i] = ethereum_account_addr[i]; }
+        res[offset + i] = ethereum_account_addr[i];
     }
-    offset += ethereum_account_addr_len;
+    offset += MAX_ETH_ADDR_LEN;
     // Convert u128 to 16 bytes (Big-Endian)
     let quantity_bytes = (quantity as Field).to_be_bytes::<16>();
     for i in 0..16 { res[offset + i] = quantity_bytes[i]; }
@@ -327,21 +326,21 @@ fn encode_forwarder_calldata(
     let mut offset: u32 = 0;
 
     for i in 0..MAX_FORWARDER_ADDR_LEN {
-        if i < forwarder_len { res[offset + i] = forwarder[i]; }
+        res[offset + i] = forwarder[i];
     }
-    offset += forwarder_len;
+    offset += MAX_FORWARDER_ADDR_LEN;
     for i in 0..32 {
         res[offset + i] = logic_hiding_bytes[i];
     }
     offset += 32;
     for i in 0..MAX_INPUT_LEN {
-        if i < input_len { res[offset + i] = input[i]; }
+        res[offset + i] = input[i];
     }
-    offset += input_len;
+    offset += MAX_INPUT_LEN;
     for i in 0..MAX_OUTPUT_LEN {
-        if i < output_len { res[offset + i] = output[i]; }
+        res[offset + i] = output[i];
     }
-    offset += output_len;
+    offset += MAX_OUTPUT_LEN;
     (res, offset)
 }
 
@@ -571,8 +570,8 @@ fn test_main() {
         forwarder_info: Option::none(),
     };
     let logic_digest = [
-        251, 153, 153, 15, 19, 230, 168, 227, 96, 81, 145, 231, 55, 165, 136, 25,
-        191, 33, 164, 253, 143, 42, 133, 164, 128, 127, 161, 219, 186, 209, 158, 131
+        102, 61, 202, 203, 43, 219, 120, 172, 232, 2, 121, 191, 214, 44, 195, 88,
+        239, 83, 207, 23, 83, 188, 241, 254, 234, 14, 146, 126, 147, 165, 43, 253,
     ];
 
     // Execute the main function which triggers _constrain()
