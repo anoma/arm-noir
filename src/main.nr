@@ -1,4 +1,5 @@
 use std::option::Option;
+use std::static_assert;
 
 // Constants for bounding unbounded loops and variable-length arrays
 global MAX_FORWARDER_ADDR_LEN: u32 = 20;
@@ -19,53 +20,130 @@ global MAX_PAYLOAD_DATA_LEN: u32 = 256;
 global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1125;
 global CALL_TYPE_WRAP: u8 = 0;
 global CALL_TYPE_UNWRAP: u8 = 1;
+global PRF_EXPAND_PERSONALIZATION_LEN: u32 = 16;
+global PRF_EXPAND_PERSONALIZATION: [u8; PRF_EXPAND_PERSONALIZATION_LEN] = "RISC0_ExpandSeed".as_bytes();
+global DIGEST_BYTES: u32 = 32;
+global QUANTITY_BYTES: u32 = 16;
+global RESOURCE_BYTES: u32 = DIGEST_BYTES
+    + DIGEST_BYTES
+    + DIGEST_BYTES
+    + QUANTITY_BYTES
+    + 1
+    + DIGEST_BYTES
+    + DIGEST_BYTES;
+global PSI_BYTES: u32 = PRF_EXPAND_PERSONALIZATION_LEN + 1 + 2 * DIGEST_BYTES;
+global PRF_EXPAND_PSI: u8 = 0;
 
-struct Resource {
-    logic_ref: [u8; 32],
-    label_ref: [u8; 32],
-    value_ref: [u8; 32],
-    quantity: u128,
-    nonce: [u8; 32],
-    nk_commitment: [u8; 32],
-    is_ephemeral: bool,
-}
-
-impl Resource {
-    fn to_bytes(self) -> [u8; 177] {
-        let mut bytes = [0; 177];
-        for i in 0..32 { bytes[i] = self.logic_ref[i]; }
-        for i in 0..32 { bytes[32 + i] = self.label_ref[i]; }
-        for i in 0..32 { bytes[64 + i] = self.value_ref[i]; }
-        
-        let q_bytes = (self.quantity as Field).to_be_bytes::<16>();
-        for i in 0..16 { bytes[96 + i] = q_bytes[i]; }
-        
-        for i in 0..32 { bytes[112 + i] = self.nonce[i]; }
-        for i in 0..32 { bytes[144 + i] = self.nk_commitment[i]; }
-        bytes[176] = self.is_ephemeral as u8;
-        bytes
-    }
-
-    fn commit(self) -> [u8; 32] {
-        keccak256::keccak256(self.to_bytes(), 177)
-    }
-
-    fn nullify(self, nk: NullifierKey) -> [u8; 32] {
-        let mut bytes = [0; 64];
-        let c = self.commit();
-        for i in 0..32 { bytes[i] = c[i]; }
-        for i in 0..32 { bytes[32 + i] = nk.bytes[i]; }
-        keccak256::keccak256(bytes, 64)
-    }
-}
-
+/// Nullifier key
 struct NullifierKey {
-    bytes: [u8; 32],
+    bytes: [u8; DIGEST_BYTES],
 }
 
 impl NullifierKey {
-    fn commit(self) -> [u8; 32] {
-        keccak256::keccak256(self.bytes, 32)
+    /// Compute the commitment to the nullifier key
+    fn commit(self) -> [u8; DIGEST_BYTES] {
+        keccak256::keccak256(self.bytes, DIGEST_BYTES)
+    }
+}
+
+struct Resource {
+    /// a succinct representation of the predicate associated with the resource
+    logic_ref: [u8; DIGEST_BYTES],
+    /// specifies the fungibility domain for the resource
+    label_ref: [u8; DIGEST_BYTES],
+    /// the fungible value reference of the resource
+    value_ref: [u8; DIGEST_BYTES],
+    /// number representing the quantity of the resource
+    quantity: u128,
+    /// guarantees the uniqueness of the resource computable components
+    nonce: [u8; DIGEST_BYTES],
+    /// commitment to nullifier key
+    nk_commitment: [u8; DIGEST_BYTES],
+    /// flag that reflects the resource ephemerality
+    is_ephemeral: bool,
+    /// randomness seed used to derive whatever randomness needed
+    rand_seed: [u8; DIGEST_BYTES],
+}
+
+impl Resource {
+    /// Compute the inner psi for the resource
+    fn psi(self) -> [u8; DIGEST_BYTES] {
+        let mut bytes = [0u8; PSI_BYTES];
+        let mut offset: u32 = 0;
+        // Write the PRF_EXPAND_PERSONALIZATION
+        for i in 0..PRF_EXPAND_PERSONALIZATION_LEN { bytes[i] = PRF_EXPAND_PERSONALIZATION[i]; }
+        offset += PRF_EXPAND_PERSONALIZATION_LEN;
+        // Write the PRF_EXPAND_PSI
+        bytes[offset] = PRF_EXPAND_PSI;
+        offset += 1;
+        // Write the random seed
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.rand_seed[i]; }
+        offset += DIGEST_BYTES;
+        // Write the nonce
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
+        offset += DIGEST_BYTES;
+        static_assert(offset == PSI_BYTES, "resource psi pre-image malformed");
+        keccak256::keccak256(bytes, PSI_BYTES)
+    }
+    
+    fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
+        // Concatenate all the components of this resource
+        let mut bytes = [0; RESOURCE_BYTES];
+        let mut offset: u32 = 0;
+        // Write the image ID bytes
+        for i in 0..DIGEST_BYTES { bytes[i] = self.logic_ref[i]; }
+        offset += DIGEST_BYTES;
+        // Write the label_ref bytes
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.label_ref[i]; }
+        offset += DIGEST_BYTES;
+        // Write the fungible value_ref bytes
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.value_ref[i]; }
+        offset += DIGEST_BYTES;
+        // Write the quantity bytes
+        let q_bytes = (self.quantity as Field).to_be_bytes::<QUANTITY_BYTES>();
+        for i in 0..QUANTITY_BYTES { bytes[offset + i] = q_bytes[i]; }
+        offset += QUANTITY_BYTES;
+        // Write the nonce bytes
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
+        offset += DIGEST_BYTES;
+        // Write the nullifier public key bytes
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nk_commitment[i]; }
+        offset += DIGEST_BYTES;
+        // Write the ephemeral flag
+        bytes[offset] = self.is_ephemeral as u8;
+        offset += 1;
+        static_assert(offset == RESOURCE_BYTES, "resource commitment pre-image malformed");
+        bytes
+    }
+
+    /// Compute the commitment to the resource
+    fn commit(self) -> [u8; DIGEST_BYTES] {
+        // Now produce the hash
+        keccak256::keccak256(self.to_bytes(), RESOURCE_BYTES)
+    }
+
+    /// Compute the nullifier of the resource
+    fn nullify(self, nk: NullifierKey) -> [u8; DIGEST_BYTES] {
+        // Make sure that the nullifier public key corresponds to the secret key
+        assert(self.nk_commitment == nk.commit());
+        let mut bytes = [0; 4 * DIGEST_BYTES];
+        let mut offset: u32 = 0;
+        // Write the resource commitment
+        let c = self.commit();
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = c[i]; }
+        offset += DIGEST_BYTES;
+        // Write the nullifier secret key
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = nk.bytes[i]; }
+        offset += DIGEST_BYTES;
+        // Write the nonce
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
+        offset += DIGEST_BYTES;
+        // Write psi
+        let psi = self.psi();
+        for i in 0..DIGEST_BYTES { bytes[offset + i] = psi[i]; }
+        offset += DIGEST_BYTES;
+        static_assert(offset == 4 * DIGEST_BYTES, "nullifier pre-image malformed");
+        keccak256::keccak256(bytes, 4 * DIGEST_BYTES)
     }
 }
 
@@ -543,8 +621,9 @@ fn main(witness: TransferAuthWitness, logic_digest: pub [u8; 32]) {
 fn test_main() {
     let witness = TransferAuthWitness {
         resource: Resource {
-            logic_ref: [0; 32],
-            label_ref: [0; 32],
+            rand_seed: [0; DIGEST_BYTES],
+            logic_ref: [0; DIGEST_BYTES],
+            label_ref: [0; DIGEST_BYTES],
             // Pre-computed Keccak-256 hash of empty bytes to match 0-length inputs
             value_ref: [
                 201, 242, 80, 122, 186, 212, 36, 194, 132, 67, 20, 124, 121, 241, 85, 104,
@@ -552,7 +631,10 @@ fn test_main() {
             ],
             quantity: 0,
             nonce: [0; 32],
-            nk_commitment: [0; 32],
+            nk_commitment: [
+                41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
+                75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99
+            ],
             is_ephemeral: false,
         },
         is_consumed: true,
@@ -570,8 +652,8 @@ fn test_main() {
         forwarder_info: Option::none(),
     };
     let logic_digest = [
-        102, 61, 202, 203, 43, 219, 120, 172, 232, 2, 121, 191, 214, 44, 195, 88,
-        239, 83, 207, 23, 83, 188, 241, 254, 234, 14, 146, 126, 147, 165, 43, 253,
+        39, 110, 63, 236, 226, 214, 21, 70, 120, 12, 13, 16, 208, 98, 80, 178,
+        94, 227, 111, 20, 107, 195, 182, 199, 189, 210, 178, 85, 10, 137, 246, 74
     ];
 
     // Execute the main function which triggers _constrain()
