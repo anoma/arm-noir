@@ -1,5 +1,5 @@
 [package]
-name = "arm_openvm_noir"
+name = "arm_noir"
 type = "bin"
 authors = [""]
 

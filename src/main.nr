@@ -621,13 +621,12 @@ fn main(witness: TransferAuthWitness, logic_digest: pub [u8; DIGEST_BYTES]) {
 }
 
 #[test]
-fn test_main() {
+fn test_persistent_consume() {
     let witness = TransferAuthWitness {
         resource: Resource {
             rand_seed: [0; DIGEST_BYTES],
             logic_ref: [0; DIGEST_BYTES],
             label_ref: [0; DIGEST_BYTES],
-            // Pre-computed Keccak-256 hash of empty bytes to match 0-length inputs
             value_ref: [
                 251, 115, 230, 34, 134, 135, 66, 60, 171, 246, 65, 210, 213, 104, 205, 204,
                 207, 125, 253, 189, 44, 24, 199, 126, 89, 234, 46, 24, 182, 164, 120, 101
@@ -658,6 +657,157 @@ fn test_main() {
     let logic_digest = [
         252, 103, 131, 249, 94, 98, 147, 61, 162, 216, 156, 182, 40, 228, 247, 247,
         182, 212, 178, 148, 148, 15, 17, 59, 25, 93, 153, 242, 152, 174, 95, 116
+    ];
+
+    // Execute the main function which triggers _constrain()
+    main(witness, logic_digest);
+}
+
+#[test]
+fn test_persistent_create() {
+    let witness = TransferAuthWitness {
+        resource: Resource {
+            rand_seed: [0; DIGEST_BYTES],
+            logic_ref: [0; DIGEST_BYTES],
+            label_ref: [
+                218, 167, 116, 38, 195, 12, 2, 164, 61, 159, 186, 78, 132, 26, 101, 86,
+                197, 36, 212, 112, 48, 118, 46, 177, 77, 196, 175, 137, 126, 96, 93, 155
+            ],
+            value_ref: [
+                232, 189, 44, 167, 37, 59, 242, 117, 69, 20, 246, 67, 159, 172, 198, 103,
+                100, 253, 216, 110, 55, 193, 136, 128, 218, 13, 220, 36, 214, 168, 161, 44
+            ],
+            quantity: 0,
+            nonce: [0; 32],
+            nk_commitment: [
+                41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
+                75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99
+            ],
+            is_ephemeral: false,
+        },
+        is_consumed: false,
+        action_root: [0; 32],
+        nullifier_key: Option::none(), // Not required for resource creation
+        value_info: Option::some(ValueInfo {
+            auth_pk: [0; MAX_AUTH_PK_LEN],
+            encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
+        }),
+        auth_sig: Option::none(), // Not required for resource creation
+        resource_ciphertext: Option::some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: Option::some([0; MAX_DISCOVERY_CIPHERTEXT_LEN]),
+        discovery_ciphertext_len: 0,
+        label_info: Option::some(LabelInfo {
+            forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
+            erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
+        }),
+        forwarder_info: Option::none(),
+    };
+    let logic_digest = [
+        156, 48, 139, 117, 185, 218, 114, 133, 235, 229, 247, 18, 172, 167, 166, 246,
+        77, 49, 37, 158, 5, 162, 108, 72, 45, 209, 172, 233, 137, 30, 110, 249
+    ];
+
+    // Execute the main function which triggers _constrain()
+    main(witness, logic_digest);
+}
+
+#[test]
+fn test_ephemeral_wrap() {
+    let witness = TransferAuthWitness {
+        resource: Resource {
+            rand_seed: [0; DIGEST_BYTES],
+            logic_ref: [0; DIGEST_BYTES],
+            // label_ref matches calculate_label_ref([0; 20], [0; 20])
+            label_ref: [
+                218, 167, 116, 38, 195, 12, 2, 164, 61, 159, 186, 78, 132, 26, 101, 86,
+                197, 36, 212, 112, 48, 118, 46, 177, 77, 196, 175, 137, 126, 96, 93, 155
+            ],
+            value_ref: [0; DIGEST_BYTES],
+            quantity: 0,
+            nonce: [0; 32],
+            // nk_commitment matches keccak256 of the NullifierKey [0; 32]
+            nk_commitment: [
+                41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
+                75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99
+            ],
+            is_ephemeral: true, // Crucial for ephemeral logic
+        },
+        is_consumed: true, // Crucial for triggering the WRAP condition
+        action_root: [0; 32],
+        nullifier_key: Option::some(NullifierKey { bytes: [0; 32] }),
+        value_info: Option::none(),
+        auth_sig: Option::none(),
+        resource_ciphertext: Option::none(),
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: Option::none(),
+        discovery_ciphertext_len: 0,
+        label_info: Option::some(LabelInfo {
+            forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
+            erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
+        }),
+        forwarder_info: Option::some(ForwarderInfo {
+            call_type: CALL_TYPE_WRAP,
+            ethereum_account_addr: [0; MAX_ETH_ADDR_LEN],
+            permit: Option::some(PermitInfo {
+                permit_nonce: [0; MAX_PERMIT_NONCE_LEN],
+                permit_deadline: [0; MAX_PERMIT_DEADLINE_LEN],
+                permit_sig: [0; MAX_PERMIT_SIG_LEN],
+            }),
+        }),
+    };
+    let logic_digest = [
+        44, 21, 203, 216, 100, 62, 14, 92, 78, 168, 56, 112, 27, 62, 16, 118,
+        45, 96, 178, 0, 107, 147, 59, 182, 118, 49, 41, 84, 125, 131, 96, 18
+    ];
+    // Execute the main function which triggers _constrain()
+    main(witness, logic_digest);
+}
+
+#[test]
+fn test_ephemeral_unwrap() {
+    let witness = TransferAuthWitness {
+        resource: Resource {
+            rand_seed: [0; DIGEST_BYTES],
+            logic_ref: [0; DIGEST_BYTES],
+            // label_ref matches calculate_label_ref([0; 20], [0; 20])
+            label_ref: [
+                218, 167, 116, 38, 195, 12, 2, 164, 61, 159, 186, 78, 132, 26, 101, 86,
+                197, 36, 212, 112, 48, 118, 46, 177, 77, 196, 175, 137, 126, 96, 93, 155
+            ],
+            // value_ref matches value_ref_from_eth_addr([0; 20])
+            value_ref: [0; DIGEST_BYTES],
+            quantity: 0,
+            nonce: [0; 32],
+            // nk_commitment matches keccak256 of the NullifierKey [0; 32]
+            nk_commitment: [
+                41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
+                75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99
+            ],
+            is_ephemeral: true, // Crucial for ephemeral logic
+        },
+        is_consumed: false, // Crucial for triggering the UNWRAP condition
+        action_root: [0; 32],
+        nullifier_key: Option::none(), // Not required for resource creation/unwrapping
+        value_info: Option::none(),
+        auth_sig: Option::none(),
+        resource_ciphertext: Option::none(),
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: Option::none(),
+        discovery_ciphertext_len: 0,
+        label_info: Option::some(LabelInfo {
+            forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
+            erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
+        }),
+        forwarder_info: Option::some(ForwarderInfo {
+            call_type: CALL_TYPE_UNWRAP,
+            ethereum_account_addr: [0; MAX_ETH_ADDR_LEN],
+            permit: Option::none(), // Permit is not required for an unwrap
+        }),
+    };
+    let logic_digest = [
+        84, 111, 49, 83, 109, 115, 229, 73, 212, 165, 27, 60, 22, 175, 126, 168,
+        39, 245, 252, 90, 166, 76, 248, 249, 22, 135, 7, 128, 29, 126, 131, 143
     ];
 
     // Execute the main function which triggers _constrain()
