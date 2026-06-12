@@ -8,17 +8,17 @@ global MAX_ETH_ADDR_LEN: u32 = 20;
 global MAX_AUTH_PK_LEN: u32 = 65;
 global MAX_ENCRYPTION_PK_LEN: u32 = 65;
 global MAX_AUTH_SIG_LEN: u32 = 64;
-global MAX_RESOURCE_CIPHERTEXT_LEN: u32 = 256;
-global MAX_DISCOVERY_CIPHERTEXT_LEN: u32 = 256;
+global MAX_RESOURCE_CIPHERTEXT_LEN: u32 = 340;
+global MAX_DISCOVERY_CIPHERTEXT_LEN: u32 = 340;
 global MAX_PERMIT_NONCE_LEN: u32 = 32;
 global MAX_PERMIT_DEADLINE_LEN: u32 = 32;
 global MAX_PERMIT_SIG_LEN: u32 = 65;
-global MAX_INPUT_LEN: u32 = 512;
-global MAX_OUTPUT_LEN: u32 = 512;
-global MAX_FORWARDER_CALLDATA_LEN: u32 = 256;
+global MAX_INPUT_LEN: u32 = 256;
+global MAX_OUTPUT_LEN: u32 = 64;
+global MAX_FORWARDER_CALLDATA_LEN: u32 = 340;
 global MAX_BLOBS_PER_PAYLOAD: u32 = 1;
-global MAX_BLOB_LEN: u32 = 256;
-global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1125;
+global MAX_BLOB_LEN: u32 = 340;
+global MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1461;
 global CALL_TYPE_WRAP: u8 = 0;
 global CALL_TYPE_UNWRAP: u8 = 1;
 global PRF_EXPAND_PERSONALIZATION_LEN: u32 = 16;
@@ -656,8 +656,8 @@ fn test_main() {
         forwarder_info: Option::none(),
     };
     let logic_digest = [
-        81, 29, 226, 158, 162, 241, 84, 165, 206, 201, 229, 201, 29, 191, 100, 23,
-        185, 172, 31, 184, 129, 141, 121, 175, 74, 77, 20, 78, 85, 122, 55, 181
+        252, 103, 131, 249, 94, 98, 147, 61, 162, 216, 156, 182, 40, 228, 247, 247,
+        182, 212, 178, 148, 148, 15, 17, 59, 25, 93, 153, 242, 152, 174, 95, 116
     ];
 
     // Execute the main function which triggers _constrain()
