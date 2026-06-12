@@ -174,10 +174,8 @@ impl Resource {
 struct LabelInfo {
     /// Address of the forwarder contract for this resource.
     forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
-    forwarder_addr_len: u32,
     /// Address of the wrapped token within this resource (e.g. USDC).
     erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
-    erc20_token_addr_len: u32,
 }
 
 /// The PermitInfo contains information about the permit2 signature that is used to generate
@@ -185,13 +183,10 @@ struct LabelInfo {
 struct PermitInfo {
     /// Nonce of the permit2 signature.
     permit_nonce: [u8; MAX_PERMIT_NONCE_LEN],
-    permit_nonce_len: u32,
     /// Deadline of the permit2 signature (i.e., when does it expire)
     permit_deadline: [u8; MAX_PERMIT_DEADLINE_LEN],
-    permit_deadline_len: u32,
     /// Signature
     permit_sig: [u8; MAX_PERMIT_SIG_LEN],
-    permit_sig_len: u32,
 }
 
 /// ForwarderInfo holds information about the forwarder contract being used by a transaction.
@@ -200,7 +195,6 @@ struct ForwarderInfo {
     call_type: u8,
     /// Address of the ethereum account
     ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
-    ethereum_account_addr_len: u32,
     /// PermitInfo (see struct)
     permit: Option<PermitInfo>,
 }
@@ -220,7 +214,6 @@ struct TransferAuthWitness {
     value_info: Option<ValueInfo>,
     /// A consumed persistent resource requires an authorization signature
     auth_sig: Option<[u8; MAX_AUTH_SIG_LEN]>,
-    auth_sig_len: u32,
     /// See EncryptionInfo struct.
     resource_ciphertext: Option<[u8; MAX_RESOURCE_CIPHERTEXT_LEN]>,
     resource_ciphertext_len: u32,
@@ -237,10 +230,8 @@ struct TransferAuthWitness {
 pub struct ValueInfo {
     /// The authorization verifying key corresponds to the resource.value.owner
     auth_pk: [u8; MAX_AUTH_PK_LEN],
-    auth_pk_len: u32,
     /// Public key. Obtain from the receiver for persistent resource_ciphertext
     encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
-    encryption_pk_len: u32,
 }
 
 /// An expirable blob consists of a blob and a deletion criterion.
@@ -347,9 +338,7 @@ impl ResourceLogicInstance {
 /// Calculate the label ref based on the forwarded and token address for resources.
 fn calculate_label_ref(
     forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
-    forwarder_addr_len: u32,
     erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
-    erc20_token_addr_len: u32,
 ) -> [u8; 32] {
     let mut bytes = [0; MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN];
     let mut offset = 0;
@@ -364,9 +353,7 @@ fn calculate_label_ref(
 /// Calculate the value ref based on an authorization key and an encryption key for a given user.
 fn persistent_value_ref(
     auth_pk: [u8; MAX_AUTH_PK_LEN],
-    auth_pk_len: u32,
     encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
-    encryption_pk_len: u32,
 ) -> [u8; 32] {
     let mut bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
     let mut offset = 0;
@@ -379,26 +366,21 @@ fn persistent_value_ref(
 }
 
 /// Create the value_ref for the user's ethereum account address.
-fn value_ref_from_eth_addr(ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN], len: u32) -> [u8; 32] {
+fn value_ref_from_eth_addr(ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN]) -> [u8; DIGEST_BYTES] {
     let mut value_ref = [0; 32];
     for i in 0..MAX_ETH_ADDR_LEN { value_ref[i] = ethereum_account_addr[i]; }
-    keccak256::keccak256(value_ref, 32)
+    value_ref
 }
 
 // Mock ABI encoding functions. In a real implementation, these would perform actual ABI encoding.
 fn encode_wrap_forwarder_input(
     erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
-    erc20_token_addr_len: u32,
     quantity: u128,
     nonce: [u8; MAX_PERMIT_NONCE_LEN],
-    nonce_len: u32,
     deadline: [u8; MAX_PERMIT_DEADLINE_LEN],
-    deadline_len: u32,
     ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
-    ethereum_account_addr_len: u32,
     action_tree_root: [u8; 32],
     signature: [u8; MAX_PERMIT_SIG_LEN],
-    signature_len: u32,
 ) -> ([u8; MAX_INPUT_LEN], u32) {
     let mut res = [0; MAX_INPUT_LEN];
     let mut offset: u32 = 0;
@@ -426,9 +408,7 @@ fn encode_wrap_forwarder_input(
 
 fn encode_unwrap_forwarder_input(
     erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
-    erc20_token_addr_len: u32,
     ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
-    ethereum_account_addr_len: u32,
     quantity: u128,
 ) -> ([u8; MAX_INPUT_LEN], u32) {
     let mut res = [0; MAX_INPUT_LEN];
@@ -449,11 +429,8 @@ fn encode_unwrap_forwarder_input(
 
 fn encode_forwarder_calldata(
     forwarder: [u8; MAX_FORWARDER_ADDR_LEN],
-    forwarder_len: u32,
     input: [u8; MAX_INPUT_LEN],
-    input_len: u32,
     output: [u8; MAX_OUTPUT_LEN],
-    output_len: u32,
 ) -> ([u8; MAX_FORWARDER_CALLDATA_LEN], u32) {
     let mut res = [0; MAX_FORWARDER_CALLDATA_LEN];
     let mut offset: u32 = 0;
@@ -470,9 +447,7 @@ fn encode_forwarder_calldata(
 // Mock signature verification. In real Noir, use std::ecdsa_secp256k1::verify_signature.
 fn verify_prehash(
     pk: [u8; MAX_AUTH_PK_LEN],
-    pk_len: u32,
     sig: [u8; MAX_AUTH_SIG_LEN],
-    sig_len: u32,
     message_hash: [u8; 32],
 ) -> bool {
     assert(pk[0] == 0x04);
@@ -524,9 +499,7 @@ impl TransferAuthWitness {
         // Check resource label: label = keccak(forwarder_addr, erc20_token_addr)
         let expected_label_ref = calculate_label_ref(
             label.forwarder_addr,
-            label.forwarder_addr_len,
             label.erc20_token_addr,
-            label.erc20_token_addr_len,
         );
         assert(self.resource.label_ref == expected_label_ref);
 
@@ -539,17 +512,12 @@ impl TransferAuthWitness {
             let permit = forwarder.permit.unwrap();
             let (enc_input, enc_len) = encode_wrap_forwarder_input(
                 label.erc20_token_addr,
-                label.erc20_token_addr_len,
                 self.resource.quantity,
                 permit.permit_nonce,
-                permit.permit_nonce_len,
                 permit.permit_deadline,
-                permit.permit_deadline_len,
                 forwarder.ethereum_account_addr,
-                forwarder.ethereum_account_addr_len,
                 self.action_root,
                 permit.permit_sig,
-                permit.permit_sig_len,
             );
             input = enc_input;
             input_len = enc_len;
@@ -558,15 +526,12 @@ impl TransferAuthWitness {
             assert(forwarder.call_type as u8 == CALL_TYPE_UNWRAP);
             let expected_value_ref = value_ref_from_eth_addr(
                 forwarder.ethereum_account_addr,
-                forwarder.ethereum_account_addr_len,
             );
             assert(self.resource.value_ref == expected_value_ref);
             
             let (enc_input, enc_len) = encode_unwrap_forwarder_input(
                 label.erc20_token_addr,
-                label.erc20_token_addr_len,
                 forwarder.ethereum_account_addr,
-                forwarder.ethereum_account_addr_len,
                 self.resource.quantity,
             );
             input = enc_input;
@@ -575,11 +540,8 @@ impl TransferAuthWitness {
 
         let (data, data_len) = encode_forwarder_calldata(
             label.forwarder_addr,
-            label.forwarder_addr_len,
             input,
-            input_len,
             [0; MAX_OUTPUT_LEN],
-            0,
         );
 
         let mut app_data = AppData::default();
@@ -596,22 +558,17 @@ impl TransferAuthWitness {
     fn persistent_consume(self) -> AppData {
         let value_info = self.value_info.unwrap();
         let sig = self.auth_sig.unwrap();
-        let payload = self.resource_ciphertext.unwrap();
 
         let expected_value_ref = persistent_value_ref(
             value_info.auth_pk,
-            value_info.auth_pk_len,
             value_info.encryption_pk,
-            value_info.encryption_pk_len,
         );
         assert(self.resource.value_ref == expected_value_ref);
 
         // Verify the authorization signature
         let is_valid = verify_prehash(
             value_info.auth_pk,
-            value_info.auth_pk_len,
             sig,
-            self.auth_sig_len,
             self.action_root,
         );
         assert(is_valid);
@@ -627,17 +584,13 @@ impl TransferAuthWitness {
 
         let expected_label_ref = calculate_label_ref(
             label.forwarder_addr,
-            label.forwarder_addr_len,
             label.erc20_token_addr,
-            label.erc20_token_addr_len,
         );
         assert(self.resource.label_ref == expected_label_ref);
 
         let expected_value_ref = persistent_value_ref(
             value_info.auth_pk,
-            value_info.auth_pk_len,
             value_info.encryption_pk,
-            value_info.encryption_pk_len,
         );
         assert(self.resource.value_ref == expected_value_ref);
 
@@ -650,11 +603,10 @@ impl TransferAuthWitness {
         };
         app_data.resource_payload_len = 1;
         // Generate discovery_payload
-        let discovery = self.discovery_ciphertext.map_or([0u8; MAX_DISCOVERY_CIPHERTEXT_LEN], |d| d);
-        let discovery_len = self.discovery_ciphertext.map_or(0, |_| self.discovery_ciphertext_len);
+        let discovery_ciphertext = self.discovery_ciphertext.unwrap();
         app_data.discovery_payload[0] = ExpirableBlob {
-            blob: discovery,
-            blob_len: discovery_len,
+            blob: discovery_ciphertext,
+            blob_len: self.discovery_ciphertext_len,
             deletion_criterion: true,
         };
         app_data.discovery_payload_len = 1;
@@ -693,12 +645,9 @@ fn test_main() {
         nullifier_key: Option::some(NullifierKey { bytes: [0; 32] }),
         value_info: Option::some(ValueInfo {
             auth_pk: [0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8],
-            auth_pk_len: MAX_AUTH_PK_LEN,
             encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
-            encryption_pk_len: MAX_ENCRYPTION_PK_LEN,
         }),
         auth_sig: Option::some([0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98]),
-        auth_sig_len: 0,
         resource_ciphertext: Option::some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
         resource_ciphertext_len: 0,
         discovery_ciphertext: Option::none(),
