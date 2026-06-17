@@ -1,2 +1,2 @@
 [workspace]
-members = ["crates/transfer_auth"]
+members = ["crates/transfer_auth", "crates/compliance"]
