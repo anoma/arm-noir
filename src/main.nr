@@ -64,23 +64,29 @@ struct Resource {
     rand_seed: [u8; DIGEST_BYTES],
 }
 
+/// Write the source array into the destination array at the given offset
+fn write_bytes<let N: u32, let M: u32>(dest: &mut [u8; N], offset: &mut u32, src: [u8; M]) {
+    // Copy the bytes
+    for i in 0..M {
+        dest[*offset + i] = src[i];
+    }
+    // Update the offset
+    *offset += M;
+}
+
 impl Resource {
     /// Compute the inner psi for the resource
     fn psi(self) -> [u8; DIGEST_BYTES] {
         let mut bytes = [0u8; PSI_BYTES];
         let mut offset: u32 = 0;
         // Write the PRF_EXPAND_PERSONALIZATION
-        for i in 0..PRF_EXPAND_PERSONALIZATION_LEN { bytes[i] = PRF_EXPAND_PERSONALIZATION[i]; }
-        offset += PRF_EXPAND_PERSONALIZATION_LEN;
+        write_bytes(&mut bytes, &mut offset, PRF_EXPAND_PERSONALIZATION);
         // Write the PRF_EXPAND_PSI
-        bytes[offset] = PRF_EXPAND_PSI;
-        offset += 1;
+        write_bytes(&mut bytes, &mut offset, [PRF_EXPAND_PSI]);
         // Write the random seed
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.rand_seed[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.rand_seed);
         // Write the nonce
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.nonce);
         static_assert(offset == PSI_BYTES, "resource psi pre-image malformed");
         keccak256::keccak256(bytes, PSI_BYTES)
     }
@@ -90,17 +96,13 @@ impl Resource {
         let mut bytes = [0u8; RCM_BYTES];
         let mut offset: u32 = 0;
         // Write the PRF_EXPAND_PERSONALIZATION
-        for i in 0..PRF_EXPAND_PERSONALIZATION_LEN { bytes[i] = PRF_EXPAND_PERSONALIZATION[i]; }
-        offset += PRF_EXPAND_PERSONALIZATION_LEN;
+        write_bytes(&mut bytes, &mut offset, PRF_EXPAND_PERSONALIZATION);
         // Write the PRF_EXPAND_RCM
-        bytes[offset] = PRF_EXPAND_RCM;
-        offset += 1;
+        write_bytes(&mut bytes, &mut offset, [PRF_EXPAND_RCM]);
         // Write the random seed
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.rand_seed[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.rand_seed);
         // Write the nonce
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.nonce);
         static_assert(offset == RCM_BYTES, "resource rcm pre-image malformed");
         keccak256::keccak256(bytes, RCM_BYTES)
     }
@@ -110,31 +112,23 @@ impl Resource {
         let mut bytes = [0; RESOURCE_BYTES];
         let mut offset: u32 = 0;
         // Write the image ID bytes
-        for i in 0..DIGEST_BYTES { bytes[i] = self.logic_ref[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.logic_ref);
         // Write the label_ref bytes
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.label_ref[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.label_ref);
         // Write the fungible value_ref bytes
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.value_ref[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.value_ref);
         // Write the quantity bytes
         let q_bytes = (self.quantity as Field).to_be_bytes::<QUANTITY_BYTES>();
-        for i in 0..QUANTITY_BYTES { bytes[offset + i] = q_bytes[i]; }
-        offset += QUANTITY_BYTES;
+        write_bytes(&mut bytes, &mut offset, q_bytes);
         // Write the nonce bytes
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.nonce);
         // Write the nullifier public key bytes
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nk_commitment[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.nk_commitment);
         // Write the randomness seed bytes
         let rcm = self.rcm();
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = rcm[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, rcm);
         // Write the ephemeral flag
-        bytes[offset] = self.is_ephemeral as u8;
-        offset += 1;
+        write_bytes(&mut bytes, &mut offset, [self.is_ephemeral as u8]);
         static_assert(offset == RESOURCE_BYTES, "resource commitment pre-image malformed");
         bytes
     }
@@ -153,18 +147,14 @@ impl Resource {
         let mut offset: u32 = 0;
         // Write the resource commitment
         let c = self.commit();
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = c[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, c);
         // Write the nullifier secret key
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = nk.bytes[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, nk.bytes);
         // Write the nonce
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = self.nonce[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, self.nonce);
         // Write psi
         let psi = self.psi();
-        for i in 0..DIGEST_BYTES { bytes[offset + i] = psi[i]; }
-        offset += DIGEST_BYTES;
+        write_bytes(&mut bytes, &mut offset, psi);
         static_assert(offset == 4 * DIGEST_BYTES, "nullifier pre-image malformed");
         keccak256::keccak256(bytes, 4 * DIGEST_BYTES)
     }
@@ -296,13 +286,9 @@ impl ResourceLogicInstance {
     fn logic_digest(self) -> [u8; 32] {
         let mut buf = [0; MAX_LOGIC_DIGEST_BUF_LEN];
         let mut buf_len = 0;
-
-        for i in 0..DIGEST_BYTES { buf[buf_len + i] = self.tag[i]; }
-        buf_len += DIGEST_BYTES;
-        for i in 0..DIGEST_BYTES { buf[buf_len + i] = self.action_root[i]; }
-        buf_len += DIGEST_BYTES;
-        buf[buf_len] = self.is_consumed as u8;
-        buf_len += 1;
+        write_bytes(&mut buf, &mut buf_len, self.tag);
+        write_bytes(&mut buf, &mut buf_len, self.action_root);
+        write_bytes(&mut buf, &mut buf_len, [self.is_consumed as u8]);
 
         let lists = [
             (self.app_data.resource_payload, self.app_data.resource_payload_len),
@@ -316,18 +302,14 @@ impl ResourceLogicInstance {
             let list_len = lists[list_idx].1;
             
             let len_bytes = (list_len as Field).to_le_bytes::<PAYLOAD_LEN_BYTES>();
-            for i in 0..PAYLOAD_LEN_BYTES { buf[buf_len + i] = len_bytes[i]; }
-            buf_len += PAYLOAD_LEN_BYTES;
+            write_bytes(&mut buf, &mut buf_len, len_bytes);
 
             for p_idx in 0..MAX_BLOBS_PER_PAYLOAD {
                 let p = list[p_idx];
                 let p_len_bytes = (p.blob_len as Field).to_le_bytes::<BLOB_LEN_BYTES>();
-                for i in 0..BLOB_LEN_BYTES { buf[buf_len + i] = p_len_bytes[i]; }
-                buf_len += BLOB_LEN_BYTES;
-                for i in 0..MAX_BLOB_LEN { buf[buf_len + i] = p.blob[i]; }
-                buf_len += MAX_BLOB_LEN;
-                buf[buf_len] = p.deletion_criterion as u8;
-                buf_len += 1;
+                write_bytes(&mut buf, &mut buf_len, p_len_bytes);
+                write_bytes(&mut buf, &mut buf_len, p.blob);
+                write_bytes(&mut buf, &mut buf_len, [p.deletion_criterion as u8]);
             }
         }
         static_assert(buf_len == MAX_LOGIC_DIGEST_BUF_LEN, "logic instance digest pre-image malformed");
@@ -342,10 +324,8 @@ fn calculate_label_ref(
 ) -> [u8; 32] {
     let mut bytes = [0; MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN];
     let mut offset = 0;
-    for i in 0..MAX_FORWARDER_ADDR_LEN { bytes[i] = forwarder_addr[i]; }
-    offset += MAX_FORWARDER_ADDR_LEN;
-    for i in 0..MAX_ERC20_TOKEN_ADDR_LEN { bytes[offset + i] = erc20_token_addr[i]; }
-    offset += MAX_ERC20_TOKEN_ADDR_LEN;
+    write_bytes(&mut bytes, &mut offset, forwarder_addr);
+    write_bytes(&mut bytes, &mut offset, erc20_token_addr);
     static_assert(offset == MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN, "label reference pre-image malformed");
     keccak256::keccak256(bytes, offset)
 }
@@ -357,10 +337,8 @@ fn persistent_value_ref(
 ) -> [u8; 32] {
     let mut bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
     let mut offset = 0;
-    for i in 0..MAX_AUTH_PK_LEN { bytes[i] = auth_pk[i]; }
-    offset += MAX_AUTH_PK_LEN;
-    for i in 0..MAX_ENCRYPTION_PK_LEN { bytes[offset + i] = encryption_pk[i]; }
-    offset += MAX_ENCRYPTION_PK_LEN;
+    write_bytes(&mut bytes, &mut offset, auth_pk);
+    write_bytes(&mut bytes, &mut offset, encryption_pk);
     static_assert(offset == MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN, "value reference pre-image malformed");
     keccak256::keccak256(bytes, offset)
 }
@@ -368,7 +346,8 @@ fn persistent_value_ref(
 /// Create the value_ref for the user's ethereum account address.
 fn value_ref_from_eth_addr(ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN]) -> [u8; DIGEST_BYTES] {
     let mut value_ref = [0; 32];
-    for i in 0..MAX_ETH_ADDR_LEN { value_ref[i] = ethereum_account_addr[i]; }
+    let mut offset = 0;
+    write_bytes(&mut value_ref, &mut offset, ethereum_account_addr);
     value_ref
 }
 
@@ -384,25 +363,17 @@ fn encode_wrap_forwarder_input(
 ) -> ([u8; MAX_INPUT_LEN], u32) {
     let mut res = [0; MAX_INPUT_LEN];
     let mut offset: u32 = 0;
-
-    res[offset] = CALL_TYPE_WRAP;
-    offset += 1;
-    for i in 0..MAX_ERC20_TOKEN_ADDR_LEN { res[offset + i] = erc20_token_addr[i]; }
-    offset += MAX_ERC20_TOKEN_ADDR_LEN;
+    write_bytes(&mut res, &mut offset, [CALL_TYPE_WRAP]);
+    write_bytes(&mut res, &mut offset, erc20_token_addr);
     // Convert u128 to 16 bytes (Big-Endian)
     let quantity_bytes = (quantity as Field).to_be_bytes::<QUANTITY_BYTES>();
-    for i in 0..QUANTITY_BYTES { res[offset + i] = quantity_bytes[i]; }
-    offset += QUANTITY_BYTES;
-    for i in 0..MAX_PERMIT_NONCE_LEN { res[offset + i] = nonce[i]; }
-    offset += MAX_PERMIT_NONCE_LEN;
-    for i in 0..MAX_PERMIT_DEADLINE_LEN { res[offset + i] = deadline[i]; }
-    offset += MAX_PERMIT_DEADLINE_LEN;
-    for i in 0..MAX_ETH_ADDR_LEN { res[offset + i] = ethereum_account_addr[i]; }
-    offset += MAX_ETH_ADDR_LEN;
-    for i in 0..DIGEST_BYTES { res[offset + i] = action_tree_root[i]; }
-    offset += DIGEST_BYTES;
-    for i in 0..MAX_PERMIT_SIG_LEN { res[offset + i] = signature[i]; }
-    offset += MAX_PERMIT_SIG_LEN;
+    write_bytes(&mut res, &mut offset, quantity_bytes);
+    write_bytes(&mut res, &mut offset, nonce);
+    write_bytes(&mut res, &mut offset, deadline);
+    write_bytes(&mut res, &mut offset, ethereum_account_addr);
+    write_bytes(&mut res, &mut offset, action_tree_root);
+    write_bytes(&mut res, &mut offset, signature);
+    
     (res, offset)
 }
 
@@ -413,17 +384,12 @@ fn encode_unwrap_forwarder_input(
 ) -> ([u8; MAX_INPUT_LEN], u32) {
     let mut res = [0; MAX_INPUT_LEN];
     let mut offset: u32 = 0;
-
-    res[offset] = CALL_TYPE_UNWRAP;
-    offset += 1;
-    for i in 0..MAX_ERC20_TOKEN_ADDR_LEN { res[offset + i] = erc20_token_addr[i]; }
-    offset += MAX_ERC20_TOKEN_ADDR_LEN;
-    for i in 0..MAX_ETH_ADDR_LEN { res[offset + i] = ethereum_account_addr[i]; }
-    offset += MAX_ETH_ADDR_LEN;
+    write_bytes(&mut res, &mut offset, [CALL_TYPE_UNWRAP]);
+    write_bytes(&mut res, &mut offset, erc20_token_addr);
+    write_bytes(&mut res, &mut offset, ethereum_account_addr);
     // Convert u128 to 16 bytes (Big-Endian)
     let quantity_bytes = (quantity as Field).to_be_bytes::<QUANTITY_BYTES>();
-    for i in 0..QUANTITY_BYTES { res[offset + i] = quantity_bytes[i]; }
-    offset += QUANTITY_BYTES;
+    write_bytes(&mut res, &mut offset, quantity_bytes);
     (res, offset)
 }
 
@@ -434,13 +400,9 @@ fn encode_forwarder_calldata(
 ) -> ([u8; MAX_FORWARDER_CALLDATA_LEN], u32) {
     let mut res = [0; MAX_FORWARDER_CALLDATA_LEN];
     let mut offset: u32 = 0;
-
-    for i in 0..MAX_FORWARDER_ADDR_LEN { res[offset + i] = forwarder[i]; }
-    offset += MAX_FORWARDER_ADDR_LEN;
-    for i in 0..MAX_INPUT_LEN { res[offset + i] = input[i]; }
-    offset += MAX_INPUT_LEN;
-    for i in 0..MAX_OUTPUT_LEN { res[offset + i] = output[i]; }
-    offset += MAX_OUTPUT_LEN;
+    write_bytes(&mut res, &mut offset, forwarder);
+    write_bytes(&mut res, &mut offset, input);
+    write_bytes(&mut res, &mut offset, output);
     (res, offset)
 }
 
@@ -554,7 +516,7 @@ impl TransferAuthWitness {
         app_data
     }
 
-    // check persistent resource consumption// check persistent resource consumption
+    // check persistent resource consumption
     fn persistent_consume(self) -> AppData {
         let value_info = self.value_info.unwrap();
         let sig = self.auth_sig.unwrap();
