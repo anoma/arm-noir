@@ -1,5 +1,6 @@
 use std::option::Option;
 use std::static_assert;
+use core::{write_bytes, NullifierKey, Resource};
 
 // Constants for bounding unbounded loops and variable-length arrays
 global MAX_FORWARDER_ADDR_LEN: u32 = 20;
@@ -32,133 +33,6 @@ global PRF_EXPAND_PSI: u8 = 0;
 global PRF_EXPAND_RCM: u8 = 1;
 global BLOB_LEN_BYTES: u32 = 4;
 global PAYLOAD_LEN_BYTES: u32 = 4;
-
-/// Nullifier key
-struct NullifierKey {
-    bytes: [u8; DIGEST_BYTES],
-}
-
-impl NullifierKey {
-    /// Compute the commitment to the nullifier key
-    fn commit(self) -> [u8; DIGEST_BYTES] {
-        keccak256::keccak256(self.bytes, DIGEST_BYTES)
-    }
-}
-
-struct Resource {
-    /// a succinct representation of the predicate associated with the resource
-    logic_ref: [u8; DIGEST_BYTES],
-    /// specifies the fungibility domain for the resource
-    label_ref: [u8; DIGEST_BYTES],
-    /// the fungible value reference of the resource
-    value_ref: [u8; DIGEST_BYTES],
-    /// number representing the quantity of the resource
-    quantity: u128,
-    /// guarantees the uniqueness of the resource computable components
-    nonce: [u8; DIGEST_BYTES],
-    /// commitment to nullifier key
-    nk_commitment: [u8; DIGEST_BYTES],
-    /// flag that reflects the resource ephemerality
-    is_ephemeral: bool,
-    /// randomness seed used to derive whatever randomness needed
-    rand_seed: [u8; DIGEST_BYTES],
-}
-
-/// Write the source array into the destination array at the given offset
-fn write_bytes<let N: u32, let M: u32>(dest: &mut [u8; N], offset: &mut u32, src: [u8; M]) {
-    // Copy the bytes
-    for i in 0..M {
-        dest[*offset + i] = src[i];
-    }
-    // Update the offset
-    *offset += M;
-}
-
-impl Resource {
-    /// Compute the inner psi for the resource
-    fn psi(self) -> [u8; DIGEST_BYTES] {
-        let mut bytes = [0u8; PSI_BYTES];
-        let mut offset: u32 = 0;
-        // Write the PRF_EXPAND_PERSONALIZATION
-        write_bytes(&mut bytes, &mut offset, PRF_EXPAND_PERSONALIZATION);
-        // Write the PRF_EXPAND_PSI
-        write_bytes(&mut bytes, &mut offset, [PRF_EXPAND_PSI]);
-        // Write the random seed
-        write_bytes(&mut bytes, &mut offset, self.rand_seed);
-        // Write the nonce
-        write_bytes(&mut bytes, &mut offset, self.nonce);
-        static_assert(offset == PSI_BYTES, "resource psi pre-image malformed");
-        keccak256::keccak256(bytes, PSI_BYTES)
-    }
-
-    /// Compute the randomness to commit the resource
-    fn rcm(self) -> [u8; DIGEST_BYTES]  {
-        let mut bytes = [0u8; RCM_BYTES];
-        let mut offset: u32 = 0;
-        // Write the PRF_EXPAND_PERSONALIZATION
-        write_bytes(&mut bytes, &mut offset, PRF_EXPAND_PERSONALIZATION);
-        // Write the PRF_EXPAND_RCM
-        write_bytes(&mut bytes, &mut offset, [PRF_EXPAND_RCM]);
-        // Write the random seed
-        write_bytes(&mut bytes, &mut offset, self.rand_seed);
-        // Write the nonce
-        write_bytes(&mut bytes, &mut offset, self.nonce);
-        static_assert(offset == RCM_BYTES, "resource rcm pre-image malformed");
-        keccak256::keccak256(bytes, RCM_BYTES)
-    }
-    
-    fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
-        // Concatenate all the components of this resource
-        let mut bytes = [0; RESOURCE_BYTES];
-        let mut offset: u32 = 0;
-        // Write the image ID bytes
-        write_bytes(&mut bytes, &mut offset, self.logic_ref);
-        // Write the label_ref bytes
-        write_bytes(&mut bytes, &mut offset, self.label_ref);
-        // Write the fungible value_ref bytes
-        write_bytes(&mut bytes, &mut offset, self.value_ref);
-        // Write the quantity bytes
-        let q_bytes = (self.quantity as Field).to_be_bytes::<QUANTITY_BYTES>();
-        write_bytes(&mut bytes, &mut offset, q_bytes);
-        // Write the nonce bytes
-        write_bytes(&mut bytes, &mut offset, self.nonce);
-        // Write the nullifier public key bytes
-        write_bytes(&mut bytes, &mut offset, self.nk_commitment);
-        // Write the randomness seed bytes
-        let rcm = self.rcm();
-        write_bytes(&mut bytes, &mut offset, rcm);
-        // Write the ephemeral flag
-        write_bytes(&mut bytes, &mut offset, [self.is_ephemeral as u8]);
-        static_assert(offset == RESOURCE_BYTES, "resource commitment pre-image malformed");
-        bytes
-    }
-
-    /// Compute the commitment to the resource
-    fn commit(self) -> [u8; DIGEST_BYTES] {
-        // Now produce the hash
-        keccak256::keccak256(self.to_bytes(), RESOURCE_BYTES)
-    }
-
-    /// Compute the nullifier of the resource
-    fn nullify(self, nk: NullifierKey) -> [u8; DIGEST_BYTES] {
-        // Make sure that the nullifier public key corresponds to the secret key
-        assert(self.nk_commitment == nk.commit());
-        let mut bytes = [0; 4 * DIGEST_BYTES];
-        let mut offset: u32 = 0;
-        // Write the resource commitment
-        let c = self.commit();
-        write_bytes(&mut bytes, &mut offset, c);
-        // Write the nullifier secret key
-        write_bytes(&mut bytes, &mut offset, nk.bytes);
-        // Write the nonce
-        write_bytes(&mut bytes, &mut offset, self.nonce);
-        // Write psi
-        let psi = self.psi();
-        write_bytes(&mut bytes, &mut offset, psi);
-        static_assert(offset == 4 * DIGEST_BYTES, "nullifier pre-image malformed");
-        keccak256::keccak256(bytes, 4 * DIGEST_BYTES)
-    }
-}
 
 /// LabelInfo holds information about label plaintext.
 struct LabelInfo {
@@ -427,7 +301,7 @@ impl TransferAuthWitness {
             let nk = self.nullifier_key.unwrap();
             self.resource.nullify(nk)
         } else {
-            self.resource.commit()
+            self.resource.commitment()
         }
     }
 
