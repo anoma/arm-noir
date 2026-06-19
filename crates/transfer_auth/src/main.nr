@@ -299,7 +299,7 @@ impl TransferAuthWitness {
     fn tag(self) -> [u8; DIGEST_BYTES] {
         if self.is_consumed {
             let nk = self.nullifier_key.unwrap();
-            self.resource.nullify(nk)
+            self.resource.nullifier(nk)
         } else {
             self.resource.commitment()
         }

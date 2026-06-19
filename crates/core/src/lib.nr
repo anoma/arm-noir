@@ -1,5 +1,7 @@
 use std::option::Option;
 use std::static_assert;
+use std::hash::pedersen_commitment;
+use std::embedded_curve_ops::{fixed_base_scalar_mul, multi_scalar_mul, EmbeddedCurvePoint, EmbeddedCurveScalar};
 
 // Constants for bounding unbounded loops and variable-length arrays
 global MAX_FORWARDER_ADDR_LEN: u32 = 20;
@@ -150,14 +152,19 @@ impl Resource {
     }
 
     /// Compute the nullifier of the resource
-    pub fn nullify(self, nk: NullifierKey) -> [u8; DIGEST_BYTES] {
+    pub fn nullifier(&self, nf_key: NullifierKey) -> [u8; DIGEST_BYTES] {
+        let cm = self.commitment();
+        self.nullifier_from_commitment(nf_key, cm)
+    }
+
+    /// Compute the nullifier of the resource from its commitment
+    pub fn nullifier_from_commitment(self, nk: NullifierKey, cm: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
         // Make sure that the nullifier public key corresponds to the secret key
         assert(self.nk_commitment == nk.commit());
-        let mut bytes = [0; 4 * DIGEST_BYTES];
+        let mut bytes = [0u8; 4 * DIGEST_BYTES];
         let mut offset: u32 = 0;
         // Write the resource commitment
-        let c = self.commitment();
-        write_bytes(&mut bytes, &mut offset, c);
+        write_bytes(&mut bytes, &mut offset, cm);
         // Write the nullifier secret key
         write_bytes(&mut bytes, &mut offset, nk.bytes);
         // Write the nonce
@@ -167,6 +174,15 @@ impl Resource {
         write_bytes(&mut bytes, &mut offset, psi);
         static_assert(offset == 4 * DIGEST_BYTES, "nullifier pre-image malformed");
         keccak256::keccak256(bytes, offset)
+    }
+
+    /// Compute the kind of the resource
+    pub fn kind(self) -> EmbeddedCurvePoint {
+        // Concatenate the logic_ref and label_ref
+        let logic_ref = Field::from_le_bytes(self.logic_ref);
+        let label_ref = Field::from_le_bytes(self.label_ref);
+        // Hash to a curve point
+        pedersen_commitment([logic_ref, label_ref])
     }
 
     /// Derives the nonce by hashing
