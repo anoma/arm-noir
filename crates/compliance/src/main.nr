@@ -45,9 +45,9 @@ impl MerklePath {
             if i < self.depth {
                 let (sibling, leaf_is_on_right) = self.path[i];
                 current_root = if leaf_is_on_right {
-                    hash_two(current_root, sibling)
-                } else {
                     hash_two(sibling, current_root)
+                } else {
+                    hash_two(current_root, sibling)
                 };
             }
         }
@@ -128,6 +128,15 @@ struct ComplianceWitness {
 }
 
 impl ComplianceWitness {
+    /// Compliance constraints. Produces the public outputs of the unit by
+    /// re-computing nullifiers, commitments, tree roots, and the delta
+    /// commitment from the witness data.
+    ///
+    /// Each input resource is touched in a single pass: the same loop over
+    /// `consumed_data` (and over `created_resources`) builds the public outputs
+    /// and accumulates the (kind, signed-quantity) contributions used for the
+    /// delta commitment, so each `commitment()`, `kind()`, and field load
+    /// happens once.
     fn _constrain(self) -> ComplianceInstance {
         let mut consumed_nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
         let mut consumed_publics = [ConsumedResourcePublic {
@@ -135,7 +144,7 @@ impl ComplianceWitness {
         }; MAX_CONSUMED];
         
         let mut kinds = [EmbeddedCurvePoint::point_at_infinity(); MAX_KINDS];
-        let mut sums = [0 as Field; MAX_KINDS];
+        let mut sums = [(false, 0); MAX_KINDS];
         let mut kind_count: u32 = 0;
 
         // Constrain consumed resources and accumulate their (kind, +quantity)
@@ -165,7 +174,7 @@ impl ComplianceWitness {
                     &mut sums,
                     &mut kind_count,
                     w.resource.kind(),
-                    w.resource.quantity_scalar(),
+                    (false, w.resource.quantity),
                 );
             }
         }
@@ -192,14 +201,22 @@ impl ComplianceWitness {
                     &mut sums,
                     &mut kind_count,
                     resource.kind(),
-                    -resource.quantity_scalar(),
+                    (true, resource.quantity),
                 );
             }
         }
 
+        // Convert the magnitudes into scalars and move the sign into the kind
+        let sum_scalars = sums.map(|(_neg, mag)| EmbeddedCurveScalar::from_field(mag as Field));
+        for k in 0..MAX_KINDS {
+            // If the current magnitude is negative
+            if sums[k].0 {
+                // Then negate the kind instead of the scalar
+                kinds[k] = -kinds[k];
+            }
+        }
         // Pedersen commit to the per-kind sums; the binding generators are the
         // kind points themselves, plus the standard generator for `rcv`.
-        let mut sum_scalars = sums.map(EmbeddedCurveScalar::from_field);
         let delta = multi_scalar_mul(kinds, sum_scalars) + fixed_base_scalar_mul(self.rcv);
 
         ComplianceInstance {
@@ -209,6 +226,18 @@ impl ComplianceWitness {
             created_count: self.created_count,
             delta: delta,
         }
+    }
+}
+
+/// Takes two numbers in sign-magnitude form and adds them together. The
+/// boolean being true indicates that the number is negative.
+fn add_sign_magnitude(a: (bool, u128), b: (bool, u128)) -> (bool, u128) {
+    if a.0 == b.0 {
+        (a.0, a.1 + b.1)
+    } else if a.1 >= b.1 {
+        (a.0, a.1 - b.1)
+    } else {
+        (b.0, b.1 - a.1)
     }
 }
 
@@ -222,15 +251,15 @@ impl ComplianceWitness {
 /// the unit sizes we expect.
 fn accumulate_kind(
     kinds: &mut [EmbeddedCurvePoint; MAX_KINDS],
-    sums: &mut [Field; MAX_KINDS],
+    sums: &mut [(bool, u128); MAX_KINDS],
     kind_count: &mut u32,
     kind_point: EmbeddedCurvePoint,
-    signed_quantity: Field,
+    signed_quantity: (bool, u128),
 ) {
     let mut found = false;
     for k in 0..MAX_KINDS {
         if (k < *kind_count) & (kinds[k] == kind_point) {
-            sums[k] = sums[k] + signed_quantity;
+            sums[k] = add_sign_magnitude(sums[k], signed_quantity);
             found = true;
         }
     }
@@ -245,4 +274,81 @@ fn accumulate_kind(
 // --- Main Entry Point ---
 fn main(witness: ComplianceWitness) -> pub ComplianceInstance {
     witness._constrain()
+}
+
+#[test]
+fn test_compliance_valid() {
+    // 1. Setup the Nullifier Key
+    let nk_bytes: [u8; DIGEST_BYTES] = [1; DIGEST_BYTES];
+    let nk = NullifierKey { bytes: nk_bytes };
+    let nk_comm = nk.commit();
+
+    // 2. Setup a valid Consumed Resource
+    let consumed_res = Resource {
+        logic_ref: [2; DIGEST_BYTES],
+        label_ref: [3; DIGEST_BYTES],
+        value_ref: [4; DIGEST_BYTES],
+        quantity: 100,
+        nonce: [5; DIGEST_BYTES],
+        nk_commitment: nk_comm, // Must match nk.commit()
+        is_ephemeral: false,
+        rand_seed: [6; DIGEST_BYTES],
+    };
+
+    let consumed_comm = consumed_res.commitment();
+    let consumed_nullifier = consumed_res.nullifier_from_commitment(nk, consumed_comm);
+
+    // 3. Setup the Consumed Resource Witness using an empty Merkle Path
+    let consumed_data = ConsumedResourceWitness {
+        resource: consumed_res,
+        cm_merkle_path: MerklePath::empty(),
+        nf_key: nk,
+    };
+
+    // 4. Pre-compute the expected nonce for the Created Resource
+    // The circuit derives the created resource's nonce from the hash of the consumed nullifiers.
+    let mut nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
+    nullifiers[0] = consumed_nullifier;
+    let nullifiers_digest = Resource::hash_nullifiers(nullifiers, 1);
+    
+    // We are creating this as the 0-th created resource, so index = 0
+    let derived_nonce = Resource::derive_nonce(0, nullifiers_digest);
+
+    // 5. Setup the Created Resource
+    let created_res = Resource {
+        logic_ref: [2; DIGEST_BYTES], // Keep the same kind to test quantity accumulation
+        label_ref: [3; DIGEST_BYTES],
+        value_ref: [4; DIGEST_BYTES],
+        quantity: 100,                // Consumed 100, created 100 (balances out)
+        nonce: derived_nonce,         // MUST match the derived nonce to pass constraints
+        nk_commitment: nk_comm,
+        is_ephemeral: false,
+        rand_seed: [7; DIGEST_BYTES],
+    };
+
+    // 6. Pad arrays to match global limits (MAX_CONSUMED / MAX_CREATED)
+    let consumed_arr = [consumed_data; MAX_CONSUMED];
+    let created_arr = [created_res; MAX_CREATED];
+
+    // 7. Assemble the full Compliance Witness
+    let witness = ComplianceWitness {
+        consumed_data: consumed_arr,
+        consumed_count: 1,
+        created_resources: created_arr,
+        created_count: 1,
+        ephemeral_root: [0; DIGEST_BYTES],
+        // Using a zero scalar for the delta commitment randomness to keep the test simple
+        rcv: EmbeddedCurveScalar::from_field(0), 
+    };
+
+    // 8. Execute the main constraint logic
+    let instance = main(witness);
+
+    // 9. Verify the resulting public instance matches expectations
+    assert(instance.consumed_count == 1);
+    assert(instance.created_count == 1);
+    
+    // Verify the outputted nullifier and commitment match our pre-computed ones
+    assert(instance.consumed_publics[0].resource_nullifier == consumed_nullifier);
+    assert(instance.created_publics[0].resource_commitment == created_res.commitment());
 }

@@ -47,7 +47,7 @@ pub struct NullifierKey {
 
 impl NullifierKey {
     /// Compute the commitment to the nullifier key
-    fn commit(self) -> [u8; DIGEST_BYTES] {
+    pub fn commit(self) -> [u8; DIGEST_BYTES] {
         keccak256::keccak256(self.bytes, DIGEST_BYTES)
     }
 }
