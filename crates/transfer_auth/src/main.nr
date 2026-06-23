@@ -451,9 +451,8 @@ impl TransferAuthWitness {
     }
 }
 
-fn main(witness: TransferAuthWitness, logic_digest: pub [u8; DIGEST_BYTES]) {
-    let instance = witness._constrain();
-    assert(instance.logic_digest() == logic_digest);
+fn main(witness: TransferAuthWitness) -> pub [u8; DIGEST_BYTES] {
+    witness._constrain().logic_digest()
 }
 
 #[test]
@@ -500,13 +499,13 @@ fn test_persistent_consume() {
         label_info: Option::none(),
         forwarder_info: Option::none(),
     };
-    let logic_digest = [
-        252, 103, 131, 249, 94, 98, 147, 61, 162, 216, 156, 182, 40, 228, 247, 247,
-        182, 212, 178, 148, 148, 15, 17, 59, 25, 93, 153, 242, 152, 174, 95, 116
-    ];
 
     // Execute the main function which triggers _constrain()
-    main(witness, logic_digest);
+    let logic_digest = main(witness);
+    assert(logic_digest == [
+        252, 103, 131, 249, 94, 98, 147, 61, 162, 216, 156, 182, 40, 228, 247, 247,
+        182, 212, 178, 148, 148, 15, 17, 59, 25, 93, 153, 242, 152, 174, 95, 116
+    ]);
 }
 
 #[test]
@@ -549,13 +548,13 @@ fn test_persistent_create() {
         }),
         forwarder_info: Option::none(),
     };
-    let logic_digest = [
-        156, 48, 139, 117, 185, 218, 114, 133, 235, 229, 247, 18, 172, 167, 166, 246,
-        77, 49, 37, 158, 5, 162, 108, 72, 45, 209, 172, 233, 137, 30, 110, 249
-    ];
 
     // Execute the main function which triggers _constrain()
-    main(witness, logic_digest);
+    let logic_digest = main(witness);
+    assert(logic_digest == [
+        156, 48, 139, 117, 185, 218, 114, 133, 235, 229, 247, 18, 172, 167, 166, 246,
+        77, 49, 37, 158, 5, 162, 108, 72, 45, 209, 172, 233, 137, 30, 110, 249
+    ]);
 }
 
 #[test]
@@ -602,12 +601,13 @@ fn test_ephemeral_wrap() {
             }),
         }),
     };
-    let logic_digest = [
+
+    // Execute the main function which triggers _constrain()
+    let logic_digest = main(witness);
+    assert(logic_digest == [
         44, 21, 203, 216, 100, 62, 14, 92, 78, 168, 56, 112, 27, 62, 16, 118,
         45, 96, 178, 0, 107, 147, 59, 182, 118, 49, 41, 84, 125, 131, 96, 18
-    ];
-    // Execute the main function which triggers _constrain()
-    main(witness, logic_digest);
+    ]);
 }
 
 #[test]
@@ -651,11 +651,11 @@ fn test_ephemeral_unwrap() {
             permit: Option::none(), // Permit is not required for an unwrap
         }),
     };
-    let logic_digest = [
-        84, 111, 49, 83, 109, 115, 229, 73, 212, 165, 27, 60, 22, 175, 126, 168,
-        39, 245, 252, 90, 166, 76, 248, 249, 22, 135, 7, 128, 29, 126, 131, 143
-    ];
 
     // Execute the main function which triggers _constrain()
-    main(witness, logic_digest);
+    let logic_digest = main(witness);
+    assert(logic_digest == [
+        84, 111, 49, 83, 109, 115, 229, 73, 212, 165, 27, 60, 22, 175, 126, 168,
+        39, 245, 252, 90, 166, 76, 248, 249, 22, 135, 7, 128, 29, 126, 131, 143
+    ]);
 }

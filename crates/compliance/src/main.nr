@@ -1,6 +1,7 @@
 use core::{MAX_CONSUMED, write_bytes, NullifierKey, Resource};
 use bigcurve::{Secp256k1, BigCurve, Secp256k1Scalar};
 use std::embedded_curve_ops::{fixed_base_scalar_mul, multi_scalar_mul, EmbeddedCurvePoint, EmbeddedCurveScalar};
+use poseidon::poseidon2;
 
 // --- Circuit Globals ---
 global DIGEST_BYTES: u32 = 32;
@@ -19,39 +20,27 @@ global PADDING_LEAF: [u8; DIGEST_BYTES] = [
 
 // --- Cryptographic Utilities ---
 
-/// Hashes two digests together using SHA-256.
-fn hash_two(
-    left: [u8; DIGEST_BYTES],
-    right: [u8; DIGEST_BYTES],
-) -> [u8; DIGEST_BYTES] {
-    let mut hash_input = [0; 64]; // DIGEST_BYTES * 2
-    let mut offset = 0u32;
-    write_bytes(&mut hash_input, &mut offset, left);
-    write_bytes(&mut hash_input, &mut offset, right);
-    sha256::digest(hash_input)
-}
-
 /// A path from a position in a particular commitment tree to the root of that tree.
 struct MerklePath {
-    path: [([u8; DIGEST_BYTES], bool); MAX_TREE_DEPTH],
+    path: [(Field, bool); MAX_TREE_DEPTH],
     depth: u32, // Logical length of the path (since the array is statically sized)
 }
 
 impl MerklePath {
     /// Returns the root of the tree corresponding to this path applied to `leaf`.
     fn root(self, leaf: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
-        let mut current_root = leaf;
+        let mut current_root = Field::from_le_bytes(leaf);
         for i in 0..MAX_TREE_DEPTH {
             if i < self.depth {
                 let (sibling, leaf_is_on_right) = self.path[i];
                 current_root = if leaf_is_on_right {
-                    hash_two(sibling, current_root)
+                    poseidon2::Poseidon2::hash([sibling, current_root], 2)
                 } else {
-                    hash_two(current_root, sibling)
+                    poseidon2::Poseidon2::hash([current_root, sibling], 2)
                 };
             }
         }
-        current_root
+        current_root.to_le_bytes()
     }
 
     /// Returns the logical length of the Merkle path.
@@ -67,7 +56,7 @@ impl MerklePath {
     /// Creates an empty Merkle path.
     fn empty() -> Self {
         MerklePath {
-            path: [([0; DIGEST_BYTES], false); MAX_TREE_DEPTH],
+            path: [(0, false); MAX_TREE_DEPTH],
             depth: 0,
         }
     }
@@ -140,7 +129,9 @@ impl ComplianceWitness {
     fn _constrain(self) -> ComplianceInstance {
         let mut consumed_nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
         let mut consumed_publics = [ConsumedResourcePublic {
-            resource_nullifier: [0; 32], resource_logic_ref: [0; 32], commitment_tree_root: [0; 32]
+            resource_nullifier: [0; 32],
+            resource_logic_ref: [0; 32],
+            commitment_tree_root: [0; 32]
         }; MAX_CONSUMED];
         
         let mut kinds = [EmbeddedCurvePoint::point_at_infinity(); MAX_KINDS];
@@ -183,7 +174,8 @@ impl ComplianceWitness {
         // nullifiers, require it to match, and accumulate (kind, -quantity).
         let consumed_nullifiers_digest = Resource::hash_nullifiers(consumed_nullifiers, self.consumed_count);
         let mut created_publics = [CreatedResourcePublic {
-            resource_commitment: [0; 32], resource_logic_ref: [0; 32]
+            resource_commitment: [0; 32],
+            resource_logic_ref: [0; 32]
         }; MAX_CREATED];
 
         for index in 0..MAX_CREATED {
