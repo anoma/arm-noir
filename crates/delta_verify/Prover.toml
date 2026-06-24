@@ -1,0 +1,16 @@
+# The message is a standard Field element.
+message = "0x2bc"
+
+# The Grumpkin public key (EmbeddedCurvePoint) is a struct, represented here as a TOML table.
+[public_key]
+x = "0x2c39bbbde2d0ffcb5c4317dcbfa1771cf554a2f33c647446632fa707a5bf5f3f"
+y = "0x2b9c81935298af5ebe22f1a7279bb76781e6cadba3fb6c5c41ed942392dc687c"
+is_infinite = false
+
+# The signature is a tuple of two EmbeddedCurveScalars (s, e)
+[[signature]]
+lo = "0x5fd1ac0ad411110674830c54cb506212"
+hi = "0x281906862cdb4e0efec7226d757fe803"
+[[signature]]
+lo = "0x6c368959f958e525d761d06c47fd2ad6"
+hi = "0x013f6a902c6c0efafdadbd4de409690d"
