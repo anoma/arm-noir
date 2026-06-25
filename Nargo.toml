@@ -1,2 +1,2 @@
 [workspace]
-members = ["crates/transfer_auth", "crates/compliance", "crates/core", "crates/delta_verify"]
+members = ["crates/transfer_auth", "crates/compliance", "crates/core", "crates/delta_verify", "crates/aggregation"]
