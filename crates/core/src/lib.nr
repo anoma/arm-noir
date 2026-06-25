@@ -2,6 +2,7 @@ use std::option::Option;
 use std::static_assert;
 use std::hash::pedersen_commitment;
 use std::embedded_curve_ops::{fixed_base_scalar_mul, multi_scalar_mul, EmbeddedCurvePoint, EmbeddedCurveScalar};
+use bigcurve::{Secp256k1, BigCurve, Secp256k1Scalar};
 
 // Constants for bounding unbounded loops and variable-length arrays
 global MAX_FORWARDER_ADDR_LEN: u32 = 20;
@@ -183,6 +184,17 @@ impl Resource {
         let label_ref = Field::from_le_bytes(self.label_ref);
         // Hash to a curve point
         pedersen_commitment([logic_ref, label_ref])
+    }
+
+    /// Compute the secp256k1 kind of the resource
+    pub fn kind_secp256k1(self) -> Secp256k1 {
+        // Concatenate the logic_ref and label_ref
+        let mut kind_preimage = [0u8; 2*DIGEST_BYTES];
+        let mut offset = 0;
+        write_bytes(&mut kind_preimage, &mut offset, self.logic_ref);
+        write_bytes(&mut kind_preimage, &mut offset, self.label_ref);
+        // Hash to a curve point
+        Secp256k1::hash_to_curve(kind_preimage)
     }
 
     /// Derives the nonce by hashing
