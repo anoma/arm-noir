@@ -3,12 +3,18 @@ use bigcurve::{Secp256k1, BigCurve, Secp256k1Scalar};
 use std::embedded_curve_ops::{fixed_base_scalar_mul, multi_scalar_mul, EmbeddedCurvePoint, EmbeddedCurveScalar};
 use poseidon::poseidon2;
 use std::ops::Add;
+use bignum::BigNum;
+use std::static_assert;
 
 // --- Circuit Globals ---
 global DIGEST_BYTES: u32 = 32;
 global MAX_CREATED: u32 = 4;
 global MAX_KINDS: u32 = 8;
 global MAX_TREE_DEPTH: u32 = 32; // Set this to your actual max commitment tree depth
+global CONSUMED_COUNT_BYTES: u32 = 4;
+global CREATED_COUNT_BYTES: u32 = 4;
+global BASE_FIELD_BYTES: u32 = 32;
+global MAX_COMPLIANCE_DIGEST_BUF_LEN: u32 = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 
 /// A constant padding leaf used in Merkle trees.
 /// This is the hash of an empty string.
@@ -101,6 +107,34 @@ struct ComplianceInstance {
     created_count: u32,
     /// The delta coordinates of the created resource
     delta: Secp256k1,
+}
+
+impl ComplianceInstance {
+    fn digest(self) -> Field {
+        let mut buf = [0; MAX_COMPLIANCE_DIGEST_BUF_LEN];
+        let mut buf_len = 0;
+        let consumed_count_bytes = (self.consumed_count as Field).to_le_bytes::<CONSUMED_COUNT_BYTES>();
+        write_bytes(&mut buf, &mut buf_len, consumed_count_bytes);
+        for consumed_public in self.consumed_publics {
+            write_bytes(&mut buf, &mut buf_len, consumed_public.resource_nullifier);
+            write_bytes(&mut buf, &mut buf_len, consumed_public.resource_logic_ref);
+            write_bytes(&mut buf, &mut buf_len, consumed_public.commitment_tree_root);
+        }
+
+        let created_count_bytes = (self.created_count as Field).to_le_bytes::<CREATED_COUNT_BYTES>();
+        write_bytes(&mut buf, &mut buf_len, created_count_bytes);
+        for created_public in self.created_publics {
+            write_bytes(&mut buf, &mut buf_len, created_public.resource_commitment);
+            write_bytes(&mut buf, &mut buf_len, created_public.resource_logic_ref);
+        }
+
+        assert(!self.delta.is_infinity());
+        write_bytes(&mut buf, &mut buf_len, self.delta.x.to_le_bytes());
+        write_bytes(&mut buf, &mut buf_len, self.delta.y.to_le_bytes());
+        
+        static_assert(buf_len == MAX_COMPLIANCE_DIGEST_BUF_LEN, "compliance instance digest pre-image malformed");
+        Field::from_le_bytes(keccak256::keccak256(buf, buf_len))
+    }
 }
 
 /// The compliance witness contains all private inputs to the compliance proof.
@@ -264,8 +298,8 @@ fn accumulate_kind(
 }
 
 // --- Main Entry Point ---
-fn main(witness: ComplianceWitness) -> pub ComplianceInstance {
-    witness._constrain()
+fn main(witness: ComplianceWitness) -> pub Field {
+    witness._constrain().digest()
 }
 
 #[test]
@@ -329,18 +363,12 @@ fn test_compliance_valid() {
         created_resources: created_arr,
         created_count: 1,
         ephemeral_root: [0; DIGEST_BYTES],
-        // Using a zero scalar for the delta commitment randomness to keep the test simple
-        rcv: Secp256k1Scalar::zero(), 
+        rcv: Secp256k1Scalar::from(1),
     };
 
     // 8. Execute the main constraint logic
-    let instance = main(witness);
+    let compliance_digest = main(witness);
 
     // 9. Verify the resulting public instance matches expectations
-    assert(instance.consumed_count == 1);
-    assert(instance.created_count == 1);
-    
-    // Verify the outputted nullifier and commitment match our pre-computed ones
-    assert(instance.consumed_publics[0].resource_nullifier == consumed_nullifier);
-    assert(instance.created_publics[0].resource_commitment == created_res.commitment());
+    assert_eq(compliance_digest, 0x2d791f5b51a24d9face31678d39c100a761bad165e99979ef5b7d3fd25fe2d63);
 }

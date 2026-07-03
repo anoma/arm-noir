@@ -4,7 +4,7 @@ created_count = 1
 ephemeral_root = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 [witness.rcv]
-lo = "0x00"
+lo = "0x01"
 hi = "0x00"
 
 # --- Consumed Resources (4 Entries) ---

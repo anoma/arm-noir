@@ -157,7 +157,7 @@ struct ResourceLogicInstance {
 }
 
 impl ResourceLogicInstance {
-    fn logic_digest(self) -> Field {
+    fn digest(self) -> Field {
         let mut buf = [0; MAX_LOGIC_DIGEST_BUF_LEN];
         let mut buf_len = 0;
         write_bytes(&mut buf, &mut buf_len, self.tag);
@@ -452,7 +452,7 @@ impl TransferAuthWitness {
 }
 
 fn main(witness: TransferAuthWitness) -> pub Field {
-    witness._constrain().logic_digest()
+    witness._constrain().digest()
 }
 
 #[test]

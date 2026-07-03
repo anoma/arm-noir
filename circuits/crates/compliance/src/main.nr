@@ -126,6 +126,7 @@ impl ComplianceInstance {
             write_bytes(&mut buf, &mut buf_len, created_public.resource_logic_ref);
         }
 
+        assert(!self.delta.is_infinite());
         write_bytes(&mut buf, &mut buf_len, self.delta.x.to_le_bytes::<BASE_FIELD_BYTES>());
         write_bytes(&mut buf, &mut buf_len, self.delta.y.to_le_bytes::<BASE_FIELD_BYTES>());
         
@@ -362,12 +363,12 @@ fn test_compliance_valid() {
         created_count: 1,
         ephemeral_root: [0; DIGEST_BYTES],
         // Using a zero scalar for the delta commitment randomness to keep the test simple
-        rcv: EmbeddedCurveScalar::from_field(0), 
+        rcv: EmbeddedCurveScalar::from_field(1), 
     };
 
     // 8. Execute the main constraint logic
     let compliance_digest = main(witness);
 
     // 9. Verify the resulting public instance matches expectations
-    assert(compliance_digest == 0x2425aec31290a2a809aba31ee04d0dcd8c2a2b7fdbea39b4ce399a571c428282);
+    assert_eq(compliance_digest, 0x011adddb8001da508418cf1b7376e7af9cc5ceaf0051509138c8526b4e4e68c1);
 }
