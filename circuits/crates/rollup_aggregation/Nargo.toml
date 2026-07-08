@@ -10,4 +10,4 @@ bigcurve = { tag = "v0.14.0", git = "https://github.com/noir-lang/noir_bigcurve"
 core = { path = "../core" }
 poseidon = { tag = "v0.3.0", git = "https://github.com/noir-lang/poseidon" }
 schnorr = { tag = "v0.4.0", git = "https://github.com/noir-lang/schnorr" }
-bb_proof_verification = { git = "https://github.com/AztecProtocol/aztec-packages/", tag = "v5.0.0-rc.1", directory = "barretenberg/noir/bb_proof_verification" }
+bb_proof_verification = { git = "https://github.com/AztecProtocol/aztec-packages/", tag = "v5.0.0-rc.2", directory = "barretenberg/noir/bb_proof_verification" }
