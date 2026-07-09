@@ -3,9 +3,9 @@ pragma solidity ^0.8.0;
 
 import "forge-std/Test.sol";
 
-// Import the contract we want to test. 
+// Import the contract we want to test.
 // Adjust the path to match your project structure.
-import "../src/MerkleVerifier.sol"; 
+import "../src/MerkleVerifier.sol";
 
 contract MerkleVerifierTest is Test {
     MerkleVerifier public verifier;
@@ -90,7 +90,7 @@ contract MerkleVerifierTest is Test {
      */
     function test_VerifyRoot_InvalidRoot() public view {
         bytes32 wrongRoot = keccak256("totally wrong root");
-        
+
         bool isValid = verifier.verifyRoot(leaves10, wrongRoot);
         assertFalse(isValid, "An invalid root should return false.");
     }
@@ -101,7 +101,7 @@ contract MerkleVerifierTest is Test {
     function test_VerifyRoot_InvalidLeaves() public view {
         // Create a copy of the valid leaves in memory
         bytes32[1024] memory tamperedLeaves = leaves10;
-        
+
         // Tamper with one leaf (e.g., leaf at index 42)
         tamperedLeaves[42] = bytes32(uint256(999999999));
 
