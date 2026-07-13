@@ -7,12 +7,12 @@ global FIELD_BYTES: u32 = 32;
 
 // --- Main Entry Point ---
 fn main(
-    verification_key: [UltraHonkVerificationKey; 10],
-    proof: [UltraHonkProof; 10],
-    public_inputs: [Field; 10],
-    key_hash: [Field; 10],
+    verification_key: [UltraHonkVerificationKey; 5],
+    proof: [UltraHonkProof; 5],
+    public_inputs: [Field; 5],
+    key_hash: [Field; 5],
 ) {
-    for i in 0..10 {
+    for i in 0..5 {
         verify_honk_proof_non_zk(verification_key[i], proof[i], [public_inputs[i]], key_hash[i]);
     }
 }
