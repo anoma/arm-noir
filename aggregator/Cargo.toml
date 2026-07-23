@@ -1,0 +1,7 @@
+[package]
+name = "aggregator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+barretenberg-rs = "=5.0.0-nightly.20260522"
