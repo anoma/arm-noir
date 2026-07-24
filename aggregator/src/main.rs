@@ -38,46 +38,46 @@ trait Aggregator {
 }
 
 /// Proof aggregator that works purely by delegating to workers
-struct RecursiveAggregator<AggregatorId, BatchId, Proof, AggregatorIds: Iterator<Item = AggregatorId> = Range<AggregatorId>, BatchIds: Iterator<Item = BatchId> = Range<BatchId>> {
+struct RecursiveAggregator<AggregatorIds: Iterator, BatchIds: Iterator, Proof> {
     /// The ID of this aggregator in its local namespace
-    pub aggregator_id: AggregatorId,
+    pub aggregator_id: AggregatorIds::Item,
     /// Minimum batch size that can be formed from leaf proofs
     pub leaf_batch_size: usize,
     /// Queue of leaf proofs to be aggregated
     pub leaf_proofs: VecDeque<Proof>,
     /// Queue of internal proofs to be aggregated
-    pub internal_proofs: VecDeque<(BatchId, Vec<Proof>)>,
+    pub internal_proofs: VecDeque<(BatchIds::Item, Vec<Proof>)>,
     /// Queue of produced recursive proofs
-    pub recursive_proofs: VecDeque<(BatchId, Proof)>,
+    pub recursive_proofs: VecDeque<(BatchIds::Item, Proof)>,
     /// Temporary place to store recursive proofs from sub-aggregators
-    pub sub_recursive_proofs: HashMap<(AggregatorId, BatchId), Proof>,
+    pub sub_recursive_proofs: HashMap<(AggregatorIds::Item, BatchIds::Item), Proof>,
     /// Proof aggregators to offload work onto
-    pub sub_aggregators: HashMap<AggregatorId, Box<dyn Aggregator<AggregatorId = AggregatorId, BatchId = BatchId, Proof = Proof>>>,
+    pub sub_aggregators: HashMap<AggregatorIds::Item, Box<dyn Aggregator<AggregatorId = AggregatorIds::Item, BatchId = BatchIds::Item, Proof = Proof>>>,
     /// The ID to assign to the next sub aggregator
     pub free_aggregator_ids: AggregatorIds,
     /// The ID to assign to the next batch
     pub free_batch_ids: BatchIds,
     /// Map proofs to their parents
-    pub proof_parents: HashMap<(AggregatorId, BatchId), (AggregatorId, BatchId)>,
+    pub proof_parents: HashMap<(AggregatorIds::Item, BatchIds::Item), (AggregatorIds::Item, BatchIds::Item)>,
     /// Map proofs to their children
-    pub proof_children: HashMap<(AggregatorId, BatchId), ((AggregatorId, BatchId), (AggregatorId, BatchId))>,
+    pub proof_children: HashMap<(AggregatorIds::Item, BatchIds::Item), ((AggregatorIds::Item, BatchIds::Item), (AggregatorIds::Item, BatchIds::Item))>,
     /// Map qualified batch IDs to their original batch IDs
-    pub proof_aliases: HashMap<(AggregatorId, BatchId), BatchId>,
+    pub proof_aliases: HashMap<(AggregatorIds::Item, BatchIds::Item), BatchIds::Item>,
 }
 
-impl<AggregatorId, BatchId, Proof, AggregatorIds: Iterator<Item = AggregatorId>, BatchIds: Iterator<Item = BatchId>> RecursiveAggregator<AggregatorId, BatchId, Proof, AggregatorIds, BatchIds> {
-    fn gen_aggregator_id(&mut self) -> AggregatorId {
+impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> RecursiveAggregator<AggregatorIds, BatchIds, Proof> {
+    fn gen_aggregator_id(&mut self) -> AggregatorIds::Item {
         self.free_aggregator_ids.next().expect("Exhausted free aggregator IDs")
     }
     
-    fn gen_batch_id(&mut self) -> BatchId {
+    fn gen_batch_id(&mut self) -> BatchIds::Item {
         self.free_batch_ids.next().expect("Exhausted free batch IDs")
     }
 }
 
-impl<AggregatorId: Hash + Eq + Copy + Debug, BatchId: Hash + Eq + Copy, Proof, AggregatorIds: Iterator<Item = AggregatorId>, BatchIds: Iterator<Item = BatchId>> Aggregator for RecursiveAggregator<AggregatorId, BatchId, Proof, AggregatorIds, BatchIds> {
-    type AggregatorId = AggregatorId;
-    type BatchId = BatchId;
+impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for RecursiveAggregator<AggregatorIds, BatchIds, Proof> where AggregatorIds::Item: Hash + Eq + Copy + Debug, BatchIds::Item: Hash + Eq + Copy {
+    type AggregatorId = AggregatorIds::Item;
+    type BatchId = BatchIds::Item;
     type Proof = Proof;
     
     fn push_leaf_proof(&mut self, proof: Self::Proof) {
