@@ -44,6 +44,8 @@ struct RecursiveAggregator {
     pub internal_proofs: VecDeque<(u64, Vec<CircuitProveResponse>)>,
     /// Queue of produced recursive proofs
     pub recursive_proofs: VecDeque<(u64, CircuitProveResponse)>,
+    /// Temporary place to store recursive proofs from sub-aggregators
+    pub sub_recursive_proofs: HashMap<QualifiedBatchId<Self>, CircuitProveResponse>,
     /// Proof aggregators to offload work onto
     pub sub_aggregators: HashMap<u16, Box<dyn Aggregator<AggregatorId = u16, Proof = CircuitProveResponse, BatchId = u64>>>,
     /// The ID to assign to the next sub aggregator
@@ -108,8 +110,6 @@ impl Aggregator for RecursiveAggregator {
     }
 
     fn proof_throughput(&self) -> f64 {
-        // A recursive aggregator must have at least one child to process the proofs
-        assert!(self.sub_aggregators.len() > 0);
         // The throughput of a recursive aggregator is the sum of those of its sub-aggregators
         let throughput = self.sub_aggregators.values().map(|x| x.proof_throughput()).sum();
         throughput
@@ -132,7 +132,7 @@ impl Aggregator for RecursiveAggregator {
             let leaf_proofs = self.leaf_proofs.drain(..self.leaf_batch_size).collect();
             self.push_internal_proofs(leaf_proofs);
         }
-        let mut aggregator_ids: Vec<_> = self.sub_aggregators.keys().cloned().collect();
+        let mut aggregator_ids: Vec<_> = self.sub_aggregators.keys().copied().collect();
         // Get the total number of proofs that need to be distributed amongst aggregators
         let mut pending_queue_size = self.internal_proofs.iter().map(|s| s.1.len()).sum::<usize>();
         // While there are still pending proofs, distribute them amongst aggregators
@@ -152,55 +152,105 @@ impl Aggregator for RecursiveAggregator {
                 // Number of proofs required to saturate the aggregator
                 let proof_throughput = self.sub_aggregators[id].proof_throughput() as usize * 2;
                 // Only send the prefix of the queue if it can saturate this aggregator
-                if pending_queue_size >= proof_throughput {
-                    // Indicate that an aggregator has been found
-                    found = true;
-                    let mut total_chunk_size = 0;
-                    // Take as many chunks as required to saturate the aggregator
-                    while total_chunk_size < proof_throughput {
-                        // Compute the amount that needs to be drained to saturate the current aggregator
-                        let (batch_id, mut batch) = self.internal_proofs.pop_front().unwrap();
-                        let mut qualified_batch_id = (Self::AGGREGATOR_ID, batch_id);
-                        let target_size = std::cmp::min(proof_throughput.next_power_of_two(), batch.len());
-                        // Keep splitting off batches (that are powers of two) until we get to the correct size
-                        while batch.len() > target_size {
-                            // These remainder batches will be processed in future loops
-                            let batch1_id = self.gen_batch_id();
-                            let batch1 = batch.split_off(batch.len() / 2);
-                            self.internal_proofs.push_front((batch1_id, batch1));
-                            // Maintain a tree of proof dependencies
-                            let batch0_id = self.gen_batch_id();
-                            self.proof_parents.insert((Self::AGGREGATOR_ID, batch0_id), qualified_batch_id);
-                            self.proof_parents.insert((Self::AGGREGATOR_ID, batch1_id), qualified_batch_id);
-                            self.proof_children.insert(qualified_batch_id, ((Self::AGGREGATOR_ID, batch0_id), (Self::AGGREGATOR_ID, batch1_id)));
-                            qualified_batch_id = (Self::AGGREGATOR_ID, batch0_id);
-                        }
-                        // Add the drainage to the sub aggregator
-                        total_chunk_size += batch.len();
-                        let new_batch_id = self.sub_aggregators.get_mut(&id).unwrap().push_internal_proofs(batch);
-                        let new_qualified_batch_id = (*id, new_batch_id);
-                        // Replace the qualified batch ID with the new qualified batch ID
-                        if let Some(parent) = self.proof_parents.remove(&qualified_batch_id) {
-                            self.proof_parents.insert(new_qualified_batch_id, parent);
-                            let children = self.proof_children.get_mut(&parent).unwrap();
-                            if children.0 == qualified_batch_id {
-                                children.0 = new_qualified_batch_id;
-                            } else if children.1 == qualified_batch_id {
-                                children.1 = new_qualified_batch_id;
-                            }
+                if pending_queue_size < proof_throughput { continue; }
+                // Indicate that an aggregator has been found
+                found = true;
+                let mut total_chunk_size = 0;
+                // Take as many chunks as required to saturate the aggregator
+                while total_chunk_size < proof_throughput {
+                    // Compute the amount that needs to be drained to saturate the current aggregator
+                    let (batch_id, mut batch) = self.internal_proofs.pop_front().unwrap();
+                    let mut qualified_batch_id = (Self::AGGREGATOR_ID, batch_id);
+                    let target_size = std::cmp::min(proof_throughput.next_power_of_two(), batch.len());
+                    // Keep splitting off batches (that are powers of two) until we get to the correct size
+                    while batch.len() > target_size {
+                        // These remainder batches will be processed in future loops
+                        let batch1_id = self.gen_batch_id();
+                        let batch1 = batch.split_off(batch.len() / 2);
+                        self.internal_proofs.push_front((batch1_id, batch1));
+                        // Maintain a tree of proof dependencies
+                        let batch0_id = self.gen_batch_id();
+                        self.proof_parents.insert((Self::AGGREGATOR_ID, batch0_id), qualified_batch_id);
+                        self.proof_parents.insert((Self::AGGREGATOR_ID, batch1_id), qualified_batch_id);
+                        self.proof_children.insert(qualified_batch_id, ((Self::AGGREGATOR_ID, batch0_id), (Self::AGGREGATOR_ID, batch1_id)));
+                        qualified_batch_id = (Self::AGGREGATOR_ID, batch0_id);
+                    }
+                    // Add the drainage to the sub aggregator
+                    total_chunk_size += batch.len();
+                    let new_batch_id = self.sub_aggregators.get_mut(&id).unwrap().push_internal_proofs(batch);
+                    let new_qualified_batch_id = (*id, new_batch_id);
+                    // Replace the qualified batch ID with the new qualified batch ID
+                    if let Some(parent) = self.proof_parents.remove(&qualified_batch_id) {
+                        self.proof_parents.insert(new_qualified_batch_id, parent);
+                        let children = self.proof_children.get_mut(&parent).unwrap();
+                        if children.0 == qualified_batch_id {
+                            children.0 = new_qualified_batch_id;
+                        } else if children.1 == qualified_batch_id {
+                            children.1 = new_qualified_batch_id;
                         }
                     }
-                    // Sending the prefix will reduce this aggregator's queue size
-                    pending_queue_size -= total_chunk_size;
-                    break;
                 }
+                // Sending the prefix will reduce this aggregator's queue size
+                pending_queue_size -= total_chunk_size;
+                break;
             }
             // If an aggregator has not been found, then stop the distribution for now
             if !found { break; }
         }
-        // Finally, advance all the sub-aggregators
-        for aggregator in self.sub_aggregators.values_mut() {
+        // Advance all the sub-aggregators
+        for (aggregator_id, aggregator) in self.sub_aggregators.iter_mut() {
             aggregator.step();
+            // Grab all the recursive proofs from this aggregator
+            while let Some((batch_id, proof)) = aggregator.pop_recursive_proof() {
+                self.sub_recursive_proofs.insert((*aggregator_id, batch_id), proof);
+            }
+        }
+        // Finally, recombine all of the proofs from the sub-aggregators
+        let mut proof_descendants = HashMap::new();
+        for (qualified_id, _proof) in &self.sub_recursive_proofs {
+            let mut qualified_id = *qualified_id;
+            // A proof is a descendant of itself
+            proof_descendants.insert(qualified_id, vec![qualified_id]);
+            // Combine complete binary subtrees while it's possible
+            while let Some(parent) = self.proof_parents.get(&qualified_id).copied() {
+                let children = self.proof_children[&parent];
+                match (proof_descendants.get(&children.0), proof_descendants.get(&children.1)) {
+                    // Only combine complete subtrees
+                    (Some(descendants0), Some(descendants1)) if descendants0.len() == descendants1.len() => {
+                        // Remove the subtrees to ensure that recursive proving is not duplicated
+                        let mut descendants0 = proof_descendants.remove(&children.0).unwrap();
+                        let mut descendants1 = proof_descendants.remove(&children.1).unwrap();
+                        self.proof_children.remove(&parent);
+                        self.proof_parents.remove(&children.0);
+                        self.proof_parents.remove(&children.1);
+                        // Merge the descendants and store in preparation for a batch proof
+                        descendants0.append(&mut descendants1);
+                        proof_descendants.insert(parent, descendants0);
+                        // Move to the parent
+                        qualified_id = parent;
+                    },
+                    _ => break,
+                }
+            }
+        }
+        // Finally, create new batches to be recursively proved in future calls
+        for (qualified_id, descendants) in proof_descendants {
+            // Recombination is only required if there are multiple descendants
+            if descendants.len() > 1 {
+                // Grab the identified subproofs
+                let proofs: Vec<_> = descendants
+                    .into_iter()
+                    .map(|x| self.sub_recursive_proofs.remove(&x).unwrap())
+                    .collect();
+                // And push them back into the queue
+                assert_eq!(qualified_id.0, Self::AGGREGATOR_ID);
+                self.internal_proofs.push_back((qualified_id.1, proofs));
+            } else if !self.proof_parents.contains_key(&qualified_id) {
+                // Move root proofs to the output queue
+                assert_eq!(qualified_id.0, Self::AGGREGATOR_ID);
+                let root_proof = self.sub_recursive_proofs.remove(&descendants[0]).unwrap();
+                self.recursive_proofs.push_back((qualified_id.1, root_proof));
+            }
         }
     }
 }
