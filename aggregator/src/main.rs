@@ -56,6 +56,8 @@ struct RecursiveAggregator {
     pub proof_parents: HashMap<QualifiedBatchId<Self>, QualifiedBatchId<Self>>,
     /// Map proofs to their children
     pub proof_children: HashMap<QualifiedBatchId<Self>, (QualifiedBatchId<Self>, QualifiedBatchId<Self>)>,
+    /// Map qualified batch IDs to their original batch IDs
+    pub proof_aliases: HashMap<QualifiedBatchId<Self>, u64>,
 }
 
 impl RecursiveAggregator {
@@ -159,7 +161,7 @@ impl Aggregator for RecursiveAggregator {
                 // Take as many chunks as required to saturate the aggregator
                 while total_chunk_size < proof_throughput {
                     // Compute the amount that needs to be drained to saturate the current aggregator
-                    let (batch_id, mut batch) = self.internal_proofs.pop_front().unwrap();
+                    let (mut batch_id, mut batch) = self.internal_proofs.pop_front().unwrap();
                     let mut qualified_batch_id = (Self::AGGREGATOR_ID, batch_id);
                     let target_size = std::cmp::min(proof_throughput.next_power_of_two(), batch.len());
                     // Keep splitting off batches (that are powers of two) until we get to the correct size
@@ -169,11 +171,11 @@ impl Aggregator for RecursiveAggregator {
                         let batch1 = batch.split_off(batch.len() / 2);
                         self.internal_proofs.push_front((batch1_id, batch1));
                         // Maintain a tree of proof dependencies
-                        let batch0_id = self.gen_batch_id();
-                        self.proof_parents.insert((Self::AGGREGATOR_ID, batch0_id), qualified_batch_id);
+                        batch_id = self.gen_batch_id();
+                        self.proof_parents.insert((Self::AGGREGATOR_ID, batch_id), qualified_batch_id);
                         self.proof_parents.insert((Self::AGGREGATOR_ID, batch1_id), qualified_batch_id);
-                        self.proof_children.insert(qualified_batch_id, ((Self::AGGREGATOR_ID, batch0_id), (Self::AGGREGATOR_ID, batch1_id)));
-                        qualified_batch_id = (Self::AGGREGATOR_ID, batch0_id);
+                        self.proof_children.insert(qualified_batch_id, ((Self::AGGREGATOR_ID, batch_id), (Self::AGGREGATOR_ID, batch1_id)));
+                        qualified_batch_id = (Self::AGGREGATOR_ID, batch_id);
                     }
                     // Add the drainage to the sub aggregator
                     total_chunk_size += batch.len();
@@ -188,6 +190,8 @@ impl Aggregator for RecursiveAggregator {
                         } else if children.1 == qualified_batch_id {
                             children.1 = new_qualified_batch_id;
                         }
+                    } else {
+                        self.proof_aliases.insert(new_qualified_batch_id, batch_id);
                     }
                 }
                 // Sending the prefix will reduce this aggregator's queue size
@@ -245,11 +249,10 @@ impl Aggregator for RecursiveAggregator {
                 // And push them back into the queue
                 assert_eq!(qualified_id.0, Self::AGGREGATOR_ID);
                 self.internal_proofs.push_back((qualified_id.1, proofs));
-            } else if !self.proof_parents.contains_key(&qualified_id) {
+            } else if let Some(alias) = self.proof_aliases.remove(&qualified_id) {
                 // Move root proofs to the output queue
-                assert_eq!(qualified_id.0, Self::AGGREGATOR_ID);
                 let root_proof = self.sub_recursive_proofs.remove(&descendants[0]).unwrap();
-                self.recursive_proofs.push_back((qualified_id.1, root_proof));
+                self.recursive_proofs.push_back((alias, root_proof));
             }
         }
     }
