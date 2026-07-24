@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::hash::Hash;
+use std::ops::Range;
 use barretenberg_rs::generated_types::CircuitProveResponse;
 
 /// Type alias to ease generic usage of aggregators
@@ -12,10 +15,10 @@ type QualifiedBatchId<A> = (<A as Aggregator>::AggregatorId, <A as Aggregator>::
 trait Aggregator {
     /// The type that holds aggregator IDs
     type AggregatorId;
-    /// The type that holds proofs
-    type Proof;
     /// The type that holds batch IDs
     type BatchId;
+    /// The type that holds proofs
+    type Proof;
     /// Push a leaf proof onto a queue of leaf proofs to aggregate
     fn push_leaf_proof(&mut self, proof: Self::Proof);
     /// Push a batch of proofs to aggregate onto a queue
@@ -35,51 +38,47 @@ trait Aggregator {
 }
 
 /// Proof aggregator that works purely by delegating to workers
-struct RecursiveAggregator {
+struct RecursiveAggregator<AggregatorId, BatchId, Proof, AggregatorIds: Iterator<Item = AggregatorId> = Range<AggregatorId>, BatchIds: Iterator<Item = BatchId> = Range<BatchId>> {
+    /// The ID of this aggregator in its local namespace
+    pub aggregator_id: AggregatorId,
     /// Minimum batch size that can be formed from leaf proofs
     pub leaf_batch_size: usize,
     /// Queue of leaf proofs to be aggregated
-    pub leaf_proofs: VecDeque<CircuitProveResponse>,
+    pub leaf_proofs: VecDeque<Proof>,
     /// Queue of internal proofs to be aggregated
-    pub internal_proofs: VecDeque<(u64, Vec<CircuitProveResponse>)>,
+    pub internal_proofs: VecDeque<(BatchId, Vec<Proof>)>,
     /// Queue of produced recursive proofs
-    pub recursive_proofs: VecDeque<(u64, CircuitProveResponse)>,
+    pub recursive_proofs: VecDeque<(BatchId, Proof)>,
     /// Temporary place to store recursive proofs from sub-aggregators
-    pub sub_recursive_proofs: HashMap<QualifiedBatchId<Self>, CircuitProveResponse>,
+    pub sub_recursive_proofs: HashMap<(AggregatorId, BatchId), Proof>,
     /// Proof aggregators to offload work onto
-    pub sub_aggregators: HashMap<u16, Box<dyn Aggregator<AggregatorId = u16, Proof = CircuitProveResponse, BatchId = u64>>>,
+    pub sub_aggregators: HashMap<AggregatorId, Box<dyn Aggregator<AggregatorId = AggregatorId, BatchId = BatchId, Proof = Proof>>>,
     /// The ID to assign to the next sub aggregator
-    pub next_aggregator_id: u16,
+    pub free_aggregator_ids: AggregatorIds,
     /// The ID to assign to the next batch
-    pub next_batch_id: u64,
+    pub free_batch_ids: BatchIds,
     /// Map proofs to their parents
-    pub proof_parents: HashMap<QualifiedBatchId<Self>, QualifiedBatchId<Self>>,
+    pub proof_parents: HashMap<(AggregatorId, BatchId), (AggregatorId, BatchId)>,
     /// Map proofs to their children
-    pub proof_children: HashMap<QualifiedBatchId<Self>, (QualifiedBatchId<Self>, QualifiedBatchId<Self>)>,
+    pub proof_children: HashMap<(AggregatorId, BatchId), ((AggregatorId, BatchId), (AggregatorId, BatchId))>,
     /// Map qualified batch IDs to their original batch IDs
-    pub proof_aliases: HashMap<QualifiedBatchId<Self>, u64>,
+    pub proof_aliases: HashMap<(AggregatorId, BatchId), BatchId>,
 }
 
-impl RecursiveAggregator {
-    const AGGREGATOR_ID: u16 = 0;
+impl<AggregatorId, BatchId, Proof, AggregatorIds: Iterator<Item = AggregatorId>, BatchIds: Iterator<Item = BatchId>> RecursiveAggregator<AggregatorId, BatchId, Proof, AggregatorIds, BatchIds> {
+    fn gen_aggregator_id(&mut self) -> AggregatorId {
+        self.free_aggregator_ids.next().expect("Exhausted free aggregator IDs")
+    }
     
-    fn gen_batch_id(&mut self) -> u64 {
-        let batch_id = self.next_batch_id;
-        self.next_batch_id += 1;
-        batch_id
-    }
-
-    fn gen_aggregator_id(&mut self) -> u16 {
-        let aggregator_id = self.next_aggregator_id;
-        self.next_aggregator_id += 1;
-        aggregator_id
+    fn gen_batch_id(&mut self) -> BatchId {
+        self.free_batch_ids.next().expect("Exhausted free batch IDs")
     }
 }
 
-impl Aggregator for RecursiveAggregator {
-    type AggregatorId = u16;
-    type Proof = CircuitProveResponse;
-    type BatchId = u64;
+impl<AggregatorId: Hash + Eq + Copy + Debug, BatchId: Hash + Eq + Copy, Proof, AggregatorIds: Iterator<Item = AggregatorId>, BatchIds: Iterator<Item = BatchId>> Aggregator for RecursiveAggregator<AggregatorId, BatchId, Proof, AggregatorIds, BatchIds> {
+    type AggregatorId = AggregatorId;
+    type BatchId = BatchId;
+    type Proof = Proof;
     
     fn push_leaf_proof(&mut self, proof: Self::Proof) {
         self.leaf_proofs.push_back(proof);
@@ -162,7 +161,7 @@ impl Aggregator for RecursiveAggregator {
                 while total_chunk_size < proof_throughput {
                     // Compute the amount that needs to be drained to saturate the current aggregator
                     let (mut batch_id, mut batch) = self.internal_proofs.pop_front().unwrap();
-                    let mut qualified_batch_id = (Self::AGGREGATOR_ID, batch_id);
+                    let mut qualified_batch_id = (self.aggregator_id, batch_id);
                     let target_size = std::cmp::min(proof_throughput.next_power_of_two(), batch.len());
                     // Keep splitting off batches (that are powers of two) until we get to the correct size
                     while batch.len() > target_size {
@@ -172,10 +171,10 @@ impl Aggregator for RecursiveAggregator {
                         self.internal_proofs.push_front((batch1_id, batch1));
                         // Maintain a tree of proof dependencies
                         batch_id = self.gen_batch_id();
-                        self.proof_parents.insert((Self::AGGREGATOR_ID, batch_id), qualified_batch_id);
-                        self.proof_parents.insert((Self::AGGREGATOR_ID, batch1_id), qualified_batch_id);
-                        self.proof_children.insert(qualified_batch_id, ((Self::AGGREGATOR_ID, batch_id), (Self::AGGREGATOR_ID, batch1_id)));
-                        qualified_batch_id = (Self::AGGREGATOR_ID, batch_id);
+                        self.proof_parents.insert((self.aggregator_id, batch_id), qualified_batch_id);
+                        self.proof_parents.insert((self.aggregator_id, batch1_id), qualified_batch_id);
+                        self.proof_children.insert(qualified_batch_id, ((self.aggregator_id, batch_id), (self.aggregator_id, batch1_id)));
+                        qualified_batch_id = (self.aggregator_id, batch_id);
                     }
                     // Add the drainage to the sub aggregator
                     total_chunk_size += batch.len();
@@ -247,7 +246,7 @@ impl Aggregator for RecursiveAggregator {
                     .map(|x| self.sub_recursive_proofs.remove(&x).unwrap())
                     .collect();
                 // And push them back into the queue
-                assert_eq!(qualified_id.0, Self::AGGREGATOR_ID);
+                assert_eq!(qualified_id.0, self.aggregator_id);
                 self.internal_proofs.push_back((qualified_id.1, proofs));
             } else if let Some(alias) = self.proof_aliases.remove(&qualified_id) {
                 // Move root proofs to the output queue
