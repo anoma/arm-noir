@@ -2,6 +2,9 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::cmp::Reverse;
 use std::ops::Range;
 use barretenberg_rs::generated_types::CircuitProveResponse;
 
@@ -35,6 +38,44 @@ trait Aggregator {
     fn remove_sub_aggregator(&mut self, id: &Self::AggregatorId) -> Option<AggregatorBox<Self>>;
     /// Consume leaf and internal proofs and produce aggregate proofs
     fn step(&mut self);
+}
+
+/// Data structure that primarily prioritizes aggregators with lower expected wait times.
+/// Secondarily it prioritizes aggregators with high throughputs. This is to reduce the
+/// fragmentation of batches.
+#[derive(PartialEq, PartialOrd)]
+struct AggregatorLoad<AggregatorId> {
+    /// How long do we expect to wait before the current load completes?
+    pub expected_wait_time: f64,
+    /// How many proofs are processed per unit of time? Negate this value.
+    pub negative_throughput: f64,
+    /// The ID of the aggregator that these statistics pertain to.
+    pub aggregator_id: AggregatorId,
+}
+
+impl<AggregatorId> AggregatorLoad<AggregatorId> {
+    /// Comput load statistics from the given aggregator
+    fn new<A: Aggregator + ?Sized>(aggregator_id: AggregatorId, aggregator: &A) -> Self {
+        let proof_throughput = aggregator.proof_throughput();
+        let expected_wait_time = if proof_throughput == 0.0 {
+            f64::INFINITY
+        } else {
+            aggregator.pending_queue_size() as f64 / proof_throughput
+        };
+        Self {
+            expected_wait_time,
+            negative_throughput: -proof_throughput,
+            aggregator_id,
+        }
+    }
+}
+
+impl<AggregatorId: PartialEq> Eq for AggregatorLoad<AggregatorId> {}
+
+impl<AggregatorId: PartialOrd> Ord for AggregatorLoad<AggregatorId> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).expect("malformed AggregatorLoad object")
+    }
 }
 
 /// Proof aggregator that works purely by delegating to workers
@@ -77,7 +118,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> RecursiveAggregator<Agg
     }
 }
 
-impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for RecursiveAggregator<AggregatorIds, BatchIds, Proof> where AggregatorIds::Item: Hash + Eq + Copy + Debug, BatchIds::Item: Hash + Eq + Copy {
+impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for RecursiveAggregator<AggregatorIds, BatchIds, Proof> where AggregatorIds::Item: Hash + Eq + Copy + Debug + PartialOrd, BatchIds::Item: Hash + Eq + Copy {
     type AggregatorId = AggregatorIds::Item;
     type BatchId = BatchIds::Item;
     type Proof = Proof;
@@ -135,29 +176,27 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
             let leaf_proofs = self.leaf_proofs.drain(..self.leaf_batch_size).collect();
             self.push_internal_proofs(leaf_proofs);
         }
-        let mut aggregator_ids: Vec<_> = self.sub_aggregators.keys().copied().collect();
+        let mut aggregator_ids: Vec<_> = self
+            .sub_aggregators
+            .iter()
+            .map(|(id, agg)| AggregatorLoad::new(*id, &**agg))
+            .collect();
+        // Sort the aggregator IDs starting with the least loaded one first
+        aggregator_ids.sort();
         // Get the total number of proofs that need to be distributed amongst aggregators
         let mut pending_queue_size = self.internal_proofs.iter().map(|s| s.1.len()).sum::<usize>();
         // While there are still pending proofs, distribute them amongst aggregators
         while pending_queue_size > 0 {
-            // Sort the aggregator starting with the least loaded one first
-            aggregator_ids.sort_by(|x, y| {
-                let x = &self.sub_aggregators[x];
-                let y = &self.sub_aggregators[y];
-                // Compare the queue size/throughput values
-                (x.pending_queue_size() as f64 * y.proof_throughput())
-                    .total_cmp(&(y.pending_queue_size() as f64 * x.proof_throughput()))
-            });
             // Indicates whether an appropriate aggregator to do the work has been found
-            let mut found = false;
+            let mut found = None;
             // Now try to place some pending proofs at the least loaded aggregator that can be saturated
-            for id in &aggregator_ids {
+            for (idx, id) in aggregator_ids.iter().enumerate() {
                 // Number of proofs required to saturate the aggregator
-                let proof_throughput = self.sub_aggregators[id].proof_throughput() as usize * 2;
+                let proof_throughput = self.sub_aggregators[&id.aggregator_id].proof_throughput() as usize * 2;
                 // Only send the prefix of the queue if it can saturate this aggregator
                 if pending_queue_size < proof_throughput { continue; }
                 // Indicate that an aggregator has been found
-                found = true;
+                found = Some(idx);
                 let mut total_chunk_size = 0;
                 // Take as many chunks as required to saturate the aggregator
                 while total_chunk_size < proof_throughput {
@@ -180,8 +219,8 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                     }
                     // Add the drainage to the sub aggregator
                     total_chunk_size += batch.len();
-                    let new_batch_id = self.sub_aggregators.get_mut(&id).unwrap().push_internal_proofs(batch);
-                    let new_qualified_batch_id = (*id, new_batch_id);
+                    let new_batch_id = self.sub_aggregators.get_mut(&id.aggregator_id).unwrap().push_internal_proofs(batch);
+                    let new_qualified_batch_id = (id.aggregator_id, new_batch_id);
                     // Replace the qualified batch ID with the new qualified batch ID
                     if let Some(parent) = self.proof_parents.remove(&qualified_batch_id) {
                         self.proof_parents.insert(new_qualified_batch_id, parent);
@@ -199,8 +238,22 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                 pending_queue_size -= total_chunk_size;
                 break;
             }
-            // If an aggregator has not been found, then stop the distribution for now
-            if !found { break; }
+            // Resort the aggregator loading vector since we've since loaded a sub-aggregator
+            if let Some(idx) = found {
+                // Get the aggregator ID that was found
+                let aggregator_id = aggregator_ids[idx].aggregator_id;
+                // Recompute the loading of this aggregator
+                let new_load = AggregatorLoad::new(aggregator_id, &*self.sub_aggregators[&aggregator_id]);
+                // Find where the aggregator should now be placed in the vector
+                let new_index = aggregator_ids.binary_search(&new_load).unwrap_or_else(|x| x);
+                // Replace the old invalid aggregator loading
+                aggregator_ids[idx] = new_load;
+                // Finally, shift the aggregator loading to the correct position
+                aggregator_ids[idx..=new_index].rotate_left(1);
+            } else {
+                // If an aggregator has not been found, then stop the distribution for now
+                break;
+            }
         }
         // Advance all the sub-aggregators and recombine proofs
         for (aggregator_id, aggregator) in self.sub_aggregators.iter_mut() {
