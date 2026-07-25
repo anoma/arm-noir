@@ -63,6 +63,8 @@ struct RecursiveAggregator<AggregatorIds: Iterator, BatchIds: Iterator, Proof> {
     pub proof_children: HashMap<(AggregatorIds::Item, BatchIds::Item), ((AggregatorIds::Item, BatchIds::Item), (AggregatorIds::Item, BatchIds::Item))>,
     /// Map qualified batch IDs to their original batch IDs
     pub proof_aliases: HashMap<(AggregatorIds::Item, BatchIds::Item), BatchIds::Item>,
+    /// Map qualified batch ID to vector of its leaf descendants
+    pub proof_descendants: HashMap<(AggregatorIds::Item, BatchIds::Item), Vec<(AggregatorIds::Item, BatchIds::Item)>>,
 }
 
 impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> RecursiveAggregator<AggregatorIds, BatchIds, Proof> {
@@ -200,44 +202,42 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
             // If an aggregator has not been found, then stop the distribution for now
             if !found { break; }
         }
-        // Advance all the sub-aggregators
+        // Advance all the sub-aggregators and recombine proofs
         for (aggregator_id, aggregator) in self.sub_aggregators.iter_mut() {
+            // Advance sub-aggregator
             aggregator.step();
             // Grab all the recursive proofs from this aggregator
             while let Some((batch_id, proof)) = aggregator.pop_recursive_proof() {
-                self.sub_recursive_proofs.insert((*aggregator_id, batch_id), proof);
-            }
-        }
-        // Finally, recombine all of the proofs from the sub-aggregators
-        let mut proof_descendants = HashMap::new();
-        for (qualified_id, _proof) in &self.sub_recursive_proofs {
-            let mut qualified_id = *qualified_id;
-            // A proof is a descendant of itself
-            proof_descendants.insert(qualified_id, vec![qualified_id]);
-            // Combine complete binary subtrees while it's possible
-            while let Some(parent) = self.proof_parents.get(&qualified_id).copied() {
-                let children = self.proof_children[&parent];
-                match (proof_descendants.get(&children.0), proof_descendants.get(&children.1)) {
-                    // Only combine complete subtrees
-                    (Some(descendants0), Some(descendants1)) if descendants0.len() == descendants1.len() => {
-                        // Remove the subtrees to ensure that recursive proving is not duplicated
-                        let mut descendants0 = proof_descendants.remove(&children.0).unwrap();
-                        let mut descendants1 = proof_descendants.remove(&children.1).unwrap();
-                        self.proof_children.remove(&parent);
-                        self.proof_parents.remove(&children.0);
-                        self.proof_parents.remove(&children.1);
-                        // Merge the descendants and store in preparation for a batch proof
-                        descendants0.append(&mut descendants1);
-                        proof_descendants.insert(parent, descendants0);
-                        // Move to the parent
-                        qualified_id = parent;
-                    },
-                    _ => break,
+                let mut qualified_id = (*aggregator_id, batch_id);
+                self.sub_recursive_proofs.insert(qualified_id, proof);
+                // Finally, recombine all of the proofs from the sub-aggregators
+                // A proof is a descendant of itself
+                self.proof_descendants.insert(qualified_id, vec![qualified_id]);
+                // Combine complete binary subtrees while it's possible
+                while let Some(parent) = self.proof_parents.get(&qualified_id).copied() {
+                    let children = self.proof_children[&parent];
+                    match (self.proof_descendants.get(&children.0), self.proof_descendants.get(&children.1)) {
+                        // Only combine complete subtrees
+                        (Some(descendants0), Some(descendants1)) if descendants0.len() == descendants1.len() => {
+                            // Remove the subtrees to ensure that recursive proving is not duplicated
+                            let mut descendants0 = self.proof_descendants.remove(&children.0).unwrap();
+                            let mut descendants1 = self.proof_descendants.remove(&children.1).unwrap();
+                            self.proof_children.remove(&parent);
+                            self.proof_parents.remove(&children.0);
+                            self.proof_parents.remove(&children.1);
+                            // Merge the descendants and store in preparation for a batch proof
+                            descendants0.append(&mut descendants1);
+                            self.proof_descendants.insert(parent, descendants0);
+                            // Move to the parent
+                            qualified_id = parent;
+                        },
+                        _ => break,
+                    }
                 }
             }
         }
         // Finally, create new batches to be recursively proved in future calls
-        for (qualified_id, descendants) in proof_descendants {
+        self.proof_descendants.retain(|qualified_id, descendants| {
             // Recombination is only required if there are multiple descendants
             if descendants.len() > 1 {
                 // Grab the identified subproofs
@@ -248,12 +248,21 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                 // And push them back into the queue
                 assert_eq!(qualified_id.0, self.aggregator_id);
                 self.internal_proofs.push_back((qualified_id.1, proofs));
+                // Do not retain these descendants otherwise combination work will be duplicated.
+                // Do not even keep a singleton entry because that suggests that the merged proof
+                // is ready.
+                false
             } else if let Some(alias) = self.proof_aliases.remove(&qualified_id) {
                 // Move root proofs to the output queue
                 let root_proof = self.sub_recursive_proofs.remove(&descendants[0]).unwrap();
                 self.recursive_proofs.push_back((alias, root_proof));
+                // Processing of this proof is complete. Hence delete entry
+                false
+            } else {
+                // Here we have a singleton that is not a root. Keep it around for future merges
+                true
             }
-        }
+        });
     }
 }
 
