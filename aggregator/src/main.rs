@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::cmp::Reverse;
 use std::ops::Range;
@@ -105,7 +106,7 @@ struct RecursiveAggregator<AggregatorIds: Iterator, BatchIds: Iterator, Proof> {
     /// Map qualified batch IDs to their original batch IDs
     pub proof_aliases: HashMap<(AggregatorIds::Item, BatchIds::Item), BatchIds::Item>,
     /// Map qualified batch ID to vector of its leaf descendants
-    pub proof_descendants: HashMap<(AggregatorIds::Item, BatchIds::Item), Vec<(AggregatorIds::Item, BatchIds::Item)>>,
+    pub proof_descendants: BTreeMap<(AggregatorIds::Item, BatchIds::Item), Vec<(AggregatorIds::Item, BatchIds::Item)>>,
 }
 
 impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> RecursiveAggregator<AggregatorIds, BatchIds, Proof> {
@@ -118,7 +119,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> RecursiveAggregator<Agg
     }
 }
 
-impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for RecursiveAggregator<AggregatorIds, BatchIds, Proof> where AggregatorIds::Item: Hash + Eq + Copy + Debug + PartialOrd, BatchIds::Item: Hash + Eq + Copy {
+impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for RecursiveAggregator<AggregatorIds, BatchIds, Proof> where AggregatorIds::Item: Hash + Eq + Copy + Debug + PartialOrd + Ord, BatchIds::Item: Hash + Eq + Copy + Ord {
     type AggregatorId = AggregatorIds::Item;
     type BatchId = BatchIds::Item;
     type Proof = Proof;
@@ -188,15 +189,15 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
         // While there are still pending proofs, distribute them amongst aggregators
         while pending_queue_size > 0 {
             // Indicates whether an appropriate aggregator to do the work has been found
-            let mut found = None;
+            let mut aggregator_idx = None;
             // Now try to place some pending proofs at the least loaded aggregator that can be saturated
             for (idx, id) in aggregator_ids.iter().enumerate() {
                 // Number of proofs required to saturate the aggregator
                 let proof_throughput = self.sub_aggregators[&id.aggregator_id].proof_throughput() as usize * 2;
                 // Only send the prefix of the queue if it can saturate this aggregator
-                if pending_queue_size < proof_throughput { continue; }
+                if proof_throughput == 0 || pending_queue_size < proof_throughput { continue; }
                 // Indicate that an aggregator has been found
-                found = Some(idx);
+                aggregator_idx = Some(idx);
                 let mut total_chunk_size = 0;
                 // Take as many chunks as required to saturate the aggregator
                 while total_chunk_size < proof_throughput {
@@ -223,7 +224,9 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                     let new_qualified_batch_id = (id.aggregator_id, new_batch_id);
                     // Replace the qualified batch ID with the new qualified batch ID
                     if let Some(parent) = self.proof_parents.remove(&qualified_batch_id) {
+                        // Make the new qualified batch ID's parent the current one's parent
                         self.proof_parents.insert(new_qualified_batch_id, parent);
+                        // And update the children of the parent to point to the new qualified batch ID
                         let children = self.proof_children.get_mut(&parent).unwrap();
                         if children.0 == qualified_batch_id {
                             children.0 = new_qualified_batch_id;
@@ -231,6 +234,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                             children.1 = new_qualified_batch_id;
                         }
                     } else {
+                        // If there's no parent, then this is a root proof. So just alias it.
                         self.proof_aliases.insert(new_qualified_batch_id, batch_id);
                     }
                 }
@@ -239,7 +243,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                 break;
             }
             // Resort the aggregator loading vector since we've since loaded a sub-aggregator
-            if let Some(idx) = found {
+            if let Some(idx) = aggregator_idx {
                 // Get the aggregator ID that was found
                 let aggregator_id = aggregator_ids[idx].aggregator_id;
                 // Recompute the loading of this aggregator
@@ -249,7 +253,9 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                 // Replace the old invalid aggregator loading
                 aggregator_ids[idx] = new_load;
                 // Finally, shift the aggregator loading to the correct position
-                aggregator_ids[idx..=new_index].rotate_left(1);
+                if new_index > idx {
+                    aggregator_ids[idx..new_index].rotate_left(1);
+                }
             } else {
                 // If an aggregator has not been found, then stop the distribution for now
                 break;
