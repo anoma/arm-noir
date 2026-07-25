@@ -41,6 +41,11 @@ trait Aggregator {
     fn step(&mut self);
 }
 
+/// Generate an ID from an essentially infinite iterator
+fn gen_id<I: Iterator>(i: &mut I) -> I::Item {
+    i.next().expect("Exhausted free IDs")
+}
+
 /// Data structure that primarily prioritizes aggregators with lower expected wait times.
 /// Secondarily it prioritizes aggregators with high throughputs. This is to reduce the
 /// fragmentation of batches.
@@ -109,16 +114,6 @@ struct RecursiveAggregator<AggregatorIds: Iterator, BatchIds: Iterator, Proof> {
     pub proof_descendants: BTreeMap<(AggregatorIds::Item, BatchIds::Item), Vec<(AggregatorIds::Item, BatchIds::Item)>>,
 }
 
-impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> RecursiveAggregator<AggregatorIds, BatchIds, Proof> {
-    fn gen_aggregator_id(&mut self) -> AggregatorIds::Item {
-        self.free_aggregator_ids.next().expect("Exhausted free aggregator IDs")
-    }
-    
-    fn gen_batch_id(&mut self) -> BatchIds::Item {
-        self.free_batch_ids.next().expect("Exhausted free batch IDs")
-    }
-}
-
 impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for RecursiveAggregator<AggregatorIds, BatchIds, Proof> where AggregatorIds::Item: Hash + Eq + Copy + Debug + PartialOrd + Ord, BatchIds::Item: Hash + Eq + Copy + Ord {
     type AggregatorId = AggregatorIds::Item;
     type BatchId = BatchIds::Item;
@@ -133,7 +128,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
         assert!(proofs.len().is_power_of_two());
         // More than one proof must be supplied for there to be work to do
         assert!(proofs.len() > 1);
-        let batch_id = self.gen_batch_id();
+        let batch_id = gen_id(&mut self.free_batch_ids);
         self.internal_proofs.push_back((batch_id, proofs));
         batch_id
     }
@@ -162,7 +157,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
 
     fn insert_sub_aggregator(&mut self, sub_aggregator: AggregatorBox<Self>) -> Self::AggregatorId {
         // Save the sub-aggregator with the given free ID
-        let aggregator_id = self.gen_aggregator_id();
+        let aggregator_id = gen_id(&mut self.free_aggregator_ids);
         self.sub_aggregators.insert(aggregator_id, sub_aggregator);
         aggregator_id
     }
@@ -208,11 +203,11 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                     // Keep splitting off batches (that are powers of two) until we get to the correct size
                     while batch.len() > target_size {
                         // These remainder batches will be processed in future loops
-                        let batch1_id = self.gen_batch_id();
+                        let batch1_id = gen_id(&mut self.free_batch_ids);
                         let batch1 = batch.split_off(batch.len() / 2);
                         self.internal_proofs.push_front((batch1_id, batch1));
                         // Maintain a tree of proof dependencies
-                        batch_id = self.gen_batch_id();
+                        batch_id = gen_id(&mut self.free_batch_ids);
                         self.proof_parents.insert((self.aggregator_id, batch_id), qualified_batch_id);
                         self.proof_parents.insert((self.aggregator_id, batch1_id), qualified_batch_id);
                         self.proof_children.insert(qualified_batch_id, ((self.aggregator_id, batch_id), (self.aggregator_id, batch1_id)));
