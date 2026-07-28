@@ -12,4 +12,5 @@ noir_artifact_cli = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4
 noirc_artifacts = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac59af0a86b036cf73ff5883d142a91" }
 bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac59af0a86b036cf73ff5883d142a91" }
 acir = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac59af0a86b036cf73ff5883d142a91" }
+noirc_abi = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac59af0a86b036cf73ff5883d142a91" }
 flate2 = "1.0.24"
