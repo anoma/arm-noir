@@ -8,8 +8,27 @@ use std::marker::PhantomData;
 use std::fmt::Display;
 use sha2::{Sha256, Digest};
 use std::ops::RangeFrom;
+use std::path::PathBuf;
 use barretenberg_rs::generated_types::CircuitProveResponse;
 use proptest::prelude::*;
+use nargo::ops::execute_program;
+use noir_artifact_cli::Artifact;
+use noirc_artifacts::program::CompiledProgram;
+use nargo::foreign_calls::{layers, DefaultForeignCallBuilder};
+use noir_artifact_cli::execution;
+use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use nargo::foreign_calls::transcript::ReplayForeignCallExecutor;
+use acir::circuit::Program;
+use barretenberg_rs::backends::FfiBackend;
+use barretenberg_rs::BarretenbergApi;
+use barretenberg_rs::generated_types::{CircuitInput, CircuitInputNoVK};
+use barretenberg_rs::generated_types::ProofSystemSettings;
+use acir::SerializationFormat;
+use std::io::Read;
+
+const CRS_DIR: &str = ".bb-crs";
+const G1_UNCOMPRESSED_DATA_PATH: &str = "bn254_g1.dat";
+const G2_UNCOMPRESSED_DATA_PATH: &str = "bn254_g2.dat";
 
 /// Type alias to ease generic usage of aggregators
 type AggregatorBox<A> = Box<dyn Aggregator<AggregatorId = <A as Aggregator>::AggregatorId, Proof = <A as Aggregator>::Proof, BatchId = <A as Aggregator>::BatchId>>;
@@ -425,10 +444,85 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for MerkleAggregato
 }
 
 fn main() {
-    let mut aggregator: MerkleAggregator<RangeFrom<usize>, RangeFrom<usize>> = MerkleAggregator::new(0usize..);
-    aggregator.push_internal_proofs(vec![[0; 32], [1; 32]]);
-    aggregator.step();
-    println!("Recursive proof: {:?}", aggregator.pop_recursive_proof());
+    let program_artifact_path = PathBuf::from("../circuits/target/recursive_no_zk_aggregation.json");
+    let prover_file = PathBuf::from("../circuits/crates/recursive_no_zk_aggregation/Prover.toml");
+    let overwrite_return = false;
+    let target_directory_path = PathBuf::from("../circuits/target/");
+    let witness_name = "recursive_no_zk_aggregation".to_string();
+    //let contract_fn = None;
+    //let oracle_file = None;
+    //let oracle_resolver = None;
+    let oracle_root_dir = PathBuf::from("../circuits/");
+    let oracle_package_name = "recursive_no_zk_aggregation".to_string();
+
+    let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
+    let artifact_name = program_artifact_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let Artifact::Program(program) = artifact else { panic!("incorrect artifact type") };
+    let circuit = CompiledProgram::from(program);
+    let circuit_name = artifact_name.to_string();
+    // Construct foreign call executor for circuit execution
+    let transcript_executor: layers::Either<ReplayForeignCallExecutor<_>, _> = layers::Either::Right(layers::Unhandled);
+
+    let mut foreign_call_executor = DefaultForeignCallBuilder {
+        output: std::io::stdout(),
+        enable_mocks: false,
+        resolver_url: None,
+        root_path: None,
+        package_name: None,
+    }
+    .build_with_base(transcript_executor);
+    // Execute the circuit on the given inputs
+    let blackbox_solver = Bn254BlackBoxSolver;
+    let results = execution::execute(&circuit, &blackbox_solver, &mut foreign_call_executor, &prover_file);
+    let results = results.expect("circuit execution error");
+    // Extract the execution witness
+    let compressed_witness_bytes = results.witness_stack.serialize().expect("output witness creation failed");
+    // Grab the compressed program bytecode from the circuit
+    let compressed_program_bytecode = Program::serialize_program_with_format(&circuit.program, SerializationFormat::default());
+
+    // Decompress program bytecode
+    let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
+    let mut program_bytecode = Vec::new();
+    gz_decoder.read_to_end(&mut program_bytecode).unwrap();
+    // Use the FFI backend which links directly to static libraries
+    let backend = FfiBackend::new().unwrap();
+    // Initialize the Barretenberg API
+    let mut api = BarretenbergApi::new(backend);
+    const NUM_POINTS: u32 = 1 << 24;
+    // CRS parameters are stored relative to home directory
+    let home_dir = std::env::home_dir().expect("unable to get home directory");
+    // Sub-directory of the home directory containing the CRS parameters
+    let crs_path = home_dir.join(CRS_DIR);
+    // Read G1 point data
+    let g1_data = std::fs::read(crs_path.join(G1_UNCOMPRESSED_DATA_PATH)).expect("unable to read G1 data");
+    // Read G2 point data
+    let g2_data = std::fs::read(crs_path.join(G2_UNCOMPRESSED_DATA_PATH)).expect("unable to read G2 data");
+    // Initialize the global CRS
+    let init_srs_response = api.srs_init_srs(&g1_data, NUM_POINTS, &g2_data).expect("unable to initialize the global CRS");
+    // Proof system settings to use for generating the verification key
+    let proof_system_settings = ProofSystemSettings {
+        ipa_accumulation: false,
+        oracle_hash_type: "keccak".to_string(),
+        disable_zk: true,
+        optimized_solidity_verifier: false,
+    };
+    // The circuit to generate a verification key for
+    let circuit_input = CircuitInputNoVK { name: circuit_name.clone(), bytecode: program_bytecode.clone() };
+    // Compute the verification key
+    let response = api.circuit_compute_vk(circuit_input, proof_system_settings.clone()).unwrap();
+    println!("Hash: {:?}", response.hash);
+
+    // Decompress witness bytes
+    let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_witness_bytes);
+    let mut witness_bytes = Vec::new();
+    gz_decoder.read_to_end(&mut witness_bytes).unwrap();
+    // The circuit to generate a proof from
+    let circuit_input = CircuitInput { name: circuit_name, bytecode: program_bytecode, verification_key: response.bytes };
+    // Compute the proof from the witness bytes
+    let response = api.circuit_prove(circuit_input, &witness_bytes, proof_system_settings).unwrap();
+    println!("Proof: {:?}", response.proof);
+    // Finally destroy the backend
+    api.destroy().unwrap();
 }
 
 proptest! {
