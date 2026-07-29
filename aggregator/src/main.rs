@@ -651,95 +651,197 @@ where
     }
 }
 
-// Combine the given two recursive proofs into a single one
-fn combine_proofs(api: &mut BarretenbergApi<FfiBackend>, left: InputMap, mut right: InputMap) -> InputMap {
-    // Load up the aggregation circuit from disk
-    let program_artifact_path = PathBuf::from("../circuits/target/recursive_no_zk_aggregation.json");
-    let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
-    let artifact_name = program_artifact_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-    let Artifact::Program(program) = artifact else { panic!("incorrect artifact type") };
-    let circuit = CompiledProgram::from(program);
-    let circuit_name = artifact_name.to_string();
+/// An aggregator that computes a Merkle root of a batch of digests.
+/// This acts as a worker node and does not delegate to further sub-aggregators.
+pub struct BarretenbergAggregator<BatchIds: Iterator, AggregatorIds: Iterator> {
+    pub api: BarretenbergApi<FfiBackend>,
+    /// The ID to assign to the next sub aggregator
+    pub free_aggregator_ids: PhantomData<AggregatorIds>,
+    /// The ID to assign to the next batch
+    pub free_batch_ids: BatchIds,
+    /// Queue for raw leaf proofs (though normally pushed directly to internal for testing)
+    pub leaf_queue: Vec<[u8; 32]>,
+    /// Queue of batches waiting to be merklized
+    pub internal_queue: VecDeque<(BatchIds::Item, Vec<InputMap>)>,
+    /// Queue of finished Merkle roots ready to be collected
+    pub completed_proofs: VecDeque<(BatchIds::Item, InputMap)>,
+}
 
-    // Combine the left and right input maps into one map to produce an aggregate proof
-    let input_map: InputMap = left
-        .into_iter()
-        .map(|(k, left_value)| {
-            let right_value = right.remove(&k).expect("left map has keys not in the right map");
-            (k, InputValue::Vec(vec![left_value, right_value]))
-        })
-        .collect();
-    assert!(right.is_empty(), "right map has keys not in the left map");
-    let expected_return = None;
-    let initial_witness = circuit.abi.encode(&input_map, None).expect("unable to encode initial witness");
-
-    // Construct foreign call executor for circuit execution
-    let transcript_executor: layers::Either<ReplayForeignCallExecutor<_>, _> = layers::Either::Right(layers::Unhandled);
-
-    let mut foreign_call_executor = DefaultForeignCallBuilder {
-        output: std::io::stdout(),
-        enable_mocks: false,
-        resolver_url: None,
-        root_path: None,
-        package_name: None,
+impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchIds, AggregatorIds> {
+    pub fn new(free_batch_ids: BatchIds) -> Self {
+        // Use the FFI backend which links directly to static libraries
+        let backend = FfiBackend::new().unwrap();
+        // Initialize the Barretenberg API
+        let api = BarretenbergApi::new(backend);
+        Self {
+            api,
+            free_aggregator_ids: PhantomData,
+            free_batch_ids,
+            leaf_queue: Vec::new(),
+            internal_queue: VecDeque::new(),
+            completed_proofs: VecDeque::new(),
+        }
     }
-    .build_with_base(transcript_executor);
-    // Execute the circuit on the given inputs
-    let blackbox_solver = Bn254BlackBoxSolver;
-    let witness_stack = nargo::ops::execute_program(
-        &circuit.program,
-        initial_witness,
-        &blackbox_solver,
-        &mut foreign_call_executor,
-    ).expect("circuit execution error");
-    // Extract certain witnesses from the stack
-    let main_witness =
-        &witness_stack.peek().expect("Should have at least one witness on the stack").witness;
 
-    let (_, actual_return) = circuit.abi.decode(main_witness).expect("unable to decode main witness");
-    let results = ExecutionResults {
-        witness_stack,
-        return_values: ReturnValues { actual_return, expected_return },
-    };
-    // Extract the execution witness
-    let compressed_witness_bytes = results.witness_stack.serialize().expect("output witness creation failed");
-    // Grab the compressed program bytecode from the circuit
-    let compressed_program_bytecode = Program::serialize_program_with_format(&circuit.program, SerializationFormat::default());
+    /// A simple deterministic hash for testing purposes.
+    /// In a real scenario, this would be replaced by a cryptographic hash like SHA-256 or Poseidon.
+    // Combine the given two recursive proofs into a single one
+    fn combine_proofs(&mut self, left: InputMap, mut right: InputMap) -> InputMap {
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from("../circuits/target/recursive_no_zk_aggregation.json");
+        let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
+        let artifact_name = program_artifact_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let Artifact::Program(program) = artifact else { panic!("incorrect artifact type") };
+        let circuit = CompiledProgram::from(program);
+        let circuit_name = artifact_name.to_string();
 
-    // Decompress program bytecode
-    let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
-    let mut program_bytecode = Vec::new();
-    gz_decoder.read_to_end(&mut program_bytecode).unwrap();
-    
-    // Proof system settings to use for generating the verification key
-    let proof_system_settings = ProofSystemSettings {
-        ipa_accumulation: false,
-        oracle_hash_type: "poseidon2".to_string(),
-        disable_zk: true,
-        optimized_solidity_verifier: false,
-    };
-    // The circuit to generate a verification key for
-    let circuit_input = CircuitInputNoVK { name: circuit_name.clone(), bytecode: program_bytecode.clone() };
-    // Compute the verification key
-    let compute_vk_response = api.circuit_compute_vk(circuit_input, proof_system_settings.clone()).unwrap();
+        // Combine the left and right input maps into one map to produce an aggregate proof
+        let input_map: InputMap = left
+            .into_iter()
+            .map(|(k, left_value)| {
+                let right_value = right.remove(&k).expect("left map has keys not in the right map");
+                (k, InputValue::Vec(vec![left_value, right_value]))
+            })
+            .collect();
+        assert!(right.is_empty(), "right map has keys not in the left map");
+        let expected_return = None;
+        let initial_witness = circuit.abi.encode(&input_map, None).expect("unable to encode initial witness");
 
-    // Decompress witness bytes
-    let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_witness_bytes);
-    let mut witness_bytes = Vec::new();
-    gz_decoder.read_to_end(&mut witness_bytes).unwrap();
-    // The circuit to generate a proof from
-    let circuit_input = CircuitInput { name: circuit_name, bytecode: program_bytecode, verification_key: compute_vk_response.bytes.clone() };
-    // Compute the proof from the witness bytes
-    let prove_response = api.circuit_prove(circuit_input, &witness_bytes, proof_system_settings.clone()).unwrap();
-    let verify_response = api.circuit_verify(&compute_vk_response.bytes, prove_response.public_inputs.clone(), prove_response.proof.clone(), proof_system_settings).unwrap();
-    println!("Verification response: {:?}", verify_response);
-    // Finally, make an output map representing the combined proofs
-    let mut output_map = InputMap::new();
-    output_map.insert("key_hash".to_string(), InputValue::Field(FieldElement::from_be_bytes_reduce(&compute_vk_response.hash)));
-    output_map.insert("proof".to_string(), InputValue::Vec(prove_response.proof.into_iter().map(|x| InputValue::Field(FieldElement::from_be_bytes_reduce(&x))).collect()));
-    output_map.insert("public_inputs".to_string(), InputValue::Field(FieldElement::from_be_bytes_reduce(&prove_response.public_inputs[0])));
-    output_map.insert("verification_key".to_string(), InputValue::Vec(compute_vk_response.fields.into_iter().map(|x| InputValue::Field(FieldElement::from_be_bytes_reduce(&x))).collect()));
-    output_map
+        // Construct foreign call executor for circuit execution
+        let transcript_executor: layers::Either<ReplayForeignCallExecutor<_>, _> = layers::Either::Right(layers::Unhandled);
+
+        let mut foreign_call_executor = DefaultForeignCallBuilder {
+            output: std::io::stdout(),
+            enable_mocks: false,
+            resolver_url: None,
+            root_path: None,
+            package_name: None,
+        }
+        .build_with_base(transcript_executor);
+        // Execute the circuit on the given inputs
+        let blackbox_solver = Bn254BlackBoxSolver;
+        let witness_stack = nargo::ops::execute_program(
+            &circuit.program,
+            initial_witness,
+            &blackbox_solver,
+            &mut foreign_call_executor,
+        ).expect("circuit execution error");
+        // Extract certain witnesses from the stack
+        let main_witness =
+            &witness_stack.peek().expect("Should have at least one witness on the stack").witness;
+
+        let (_, actual_return) = circuit.abi.decode(main_witness).expect("unable to decode main witness");
+        let results = ExecutionResults {
+            witness_stack,
+            return_values: ReturnValues { actual_return, expected_return },
+        };
+        // Extract the execution witness
+        let compressed_witness_bytes = results.witness_stack.serialize().expect("output witness creation failed");
+        // Grab the compressed program bytecode from the circuit
+        let compressed_program_bytecode = Program::serialize_program_with_format(&circuit.program, SerializationFormat::default());
+
+        // Decompress program bytecode
+        let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
+        let mut program_bytecode = Vec::new();
+        gz_decoder.read_to_end(&mut program_bytecode).unwrap();
+        
+        // Proof system settings to use for generating the verification key
+        let proof_system_settings = ProofSystemSettings {
+            ipa_accumulation: false,
+            oracle_hash_type: "poseidon2".to_string(),
+            disable_zk: true,
+            optimized_solidity_verifier: false,
+        };
+        // The circuit to generate a verification key for
+        let circuit_input = CircuitInputNoVK { name: circuit_name.clone(), bytecode: program_bytecode.clone() };
+        // Compute the verification key
+        let compute_vk_response = self.api.circuit_compute_vk(circuit_input, proof_system_settings.clone()).unwrap();
+
+        // Decompress witness bytes
+        let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_witness_bytes);
+        let mut witness_bytes = Vec::new();
+        gz_decoder.read_to_end(&mut witness_bytes).unwrap();
+        // The circuit to generate a proof from
+        let circuit_input = CircuitInput { name: circuit_name, bytecode: program_bytecode, verification_key: compute_vk_response.bytes.clone() };
+        // Compute the proof from the witness bytes
+        let prove_response = self.api.circuit_prove(circuit_input, &witness_bytes, proof_system_settings.clone()).unwrap();
+        let verify_response = self.api.circuit_verify(&compute_vk_response.bytes, prove_response.public_inputs.clone(), prove_response.proof.clone(), proof_system_settings).unwrap();
+        println!("Verification response: {:?}", verify_response);
+        // Finally, make an output map representing the combined proofs
+        let mut output_map = InputMap::new();
+        output_map.insert("key_hash".to_string(), InputValue::Field(FieldElement::from_be_bytes_reduce(&compute_vk_response.hash)));
+        output_map.insert("proof".to_string(), InputValue::Vec(prove_response.proof.into_iter().map(|x| InputValue::Field(FieldElement::from_be_bytes_reduce(&x))).collect()));
+        output_map.insert("public_inputs".to_string(), InputValue::Field(FieldElement::from_be_bytes_reduce(&prove_response.public_inputs[0])));
+        output_map.insert("verification_key".to_string(), InputValue::Vec(compute_vk_response.fields.into_iter().map(|x| InputValue::Field(FieldElement::from_be_bytes_reduce(&x))).collect()));
+        output_map
+    }
+}
+
+impl<AggregatorIds: Iterator, BatchIds: Iterator> Drop for BarretenbergAggregator<BatchIds, AggregatorIds> {
+    fn drop(&mut self) {
+        self.api.shutdown().unwrap();
+    }
+}
+
+impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for BarretenbergAggregator<BatchIds, AggregatorIds> where BatchIds::Item: Copy {
+    type AggregatorId = AggregatorIds::Item;
+    type BatchId = BatchIds::Item;
+    type Node = InputMap;
+
+    fn push_internal_proofs(&mut self, proofs: Vec<Self::Node>) -> Self::BatchId {
+        assert!(proofs.len().is_power_of_two(), "Merkle tree requires power-of-two leaves");
+        assert!(proofs.len() > 1, "Must have more than one proof to aggregate");
+        
+        let batch_id = gen_id(&mut self.free_batch_ids);
+        self.internal_queue.push_back((batch_id, proofs));
+        
+        batch_id
+    }
+
+    fn pop_recursive_proof(&mut self) -> Option<(Self::BatchId, Self::Node)> {
+        self.completed_proofs.pop_front()
+    }
+
+    fn pending_queue_size(&self) -> usize {
+        self.leaf_queue.len()
+            + self.internal_queue.iter().map(|(_, batch)| batch.len()).sum::<usize>()
+    }
+
+    fn proof_throughput(&self) -> f64 {
+        // Returns 1.0 since this aggregator processes synchronously without parallelism
+        1.0
+    }
+
+    fn insert_sub_aggregator(&mut self, _sub_aggregator: AggregatorBox<Self>) -> Self::AggregatorId {
+        unimplemented!("MerkleAggregator is a leaf worker and does not support sub-aggregators.");
+    }
+
+    fn remove_sub_aggregator(&mut self, _id: &Self::AggregatorId) {
+        unimplemented!("MerkleAggregator is a leaf worker and does not support sub-aggregators.");
+    }
+
+    fn sync(&mut self) {}
+
+    fn step(&mut self) {
+        // Pop one batch from the internal queue to process in this step
+        while let Some((batch_id, mut current_layer)) = self.internal_queue.pop_front() {
+            println!("Aggregating {} proofs", current_layer.len());
+            // Iteratively compute the Merkle root
+            while current_layer.len() > 1 {
+                let mut next_layer = Vec::with_capacity(current_layer.len() / 2);
+                let mut iter = current_layer.into_iter();
+                while let (Some(left), Some(right)) = (iter.next(), iter.next()) {
+                    next_layer.push(self.combine_proofs(left, right));
+                }
+                
+                current_layer = next_layer;
+            }
+            
+            // The single remaining element is the root
+            let root = current_layer.pop().expect("Layer should contain exactly one root digest");
+            self.completed_proofs.push_back((batch_id, root));
+        }
+    }
 }
 
 fn main() {
@@ -770,16 +872,16 @@ fn main() {
     // Initialize the global CRS
     let init_srs_response = api.srs_init_srs(&g1_data, NUM_POINTS, &g2_data).expect("unable to initialize the global CRS");
     // Finally destroy the backend
-    api.destroy().unwrap();
+    api.shutdown().unwrap();
 
     // Use the FFI backend which links directly to static libraries
     let backend = FfiBackend::new().unwrap();
     // Initialize the Barretenberg API
     let mut api = BarretenbergApi::new(backend);
-    let output_map = combine_proofs(&mut api, input_map.clone(), input_map);
-    let output_map = combine_proofs(&mut api, output_map.clone(), output_map);
+    //let output_map = combine_proofs(&mut api, input_map.clone(), input_map);
+    //let output_map = combine_proofs(&mut api, output_map.clone(), output_map);
     // Finally destroy the backend
-    api.destroy().unwrap();
+    api.shutdown().unwrap();
 }
 
 proptest! {
