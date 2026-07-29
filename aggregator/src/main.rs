@@ -208,8 +208,8 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
         // Compute the current aggregator loads
         let mut aggregator_ids: Vec<_> = self
             .sub_aggregators
-            .iter()
-            .map(|(id, agg)| AggregatorLoad::new(*id, &**agg))
+            .iter_mut()
+            .map(|(id, agg)| { agg.sync(); AggregatorLoad::new(*id, &**agg) })
             .collect();
         // Sort the aggregator IDs starting with the least loaded one first
         aggregator_ids.sort();
@@ -277,6 +277,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                 // Get the aggregator ID that was found
                 let aggregator_id = aggregator_ids[idx].aggregator_id;
                 // Recompute the loading of this aggregator
+                self.sub_aggregators.get_mut(&aggregator_id).map(|x| x.sync());
                 let new_load = AggregatorLoad::new(aggregator_id, &*self.sub_aggregators[&aggregator_id]);
                 // Find where the aggregator should now be placed in the vector
                 let new_index = aggregator_ids.binary_search(&new_load).unwrap_or_else(|x| x);
@@ -296,6 +297,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
         for (aggregator_id, aggregator) in self.sub_aggregators.iter_mut() {
             // Advance sub-aggregator
             aggregator.step();
+            aggregator.sync();
             // Grab all the recursive proofs from this aggregator
             while let Some((batch_id, proof)) = aggregator.pop_recursive_proof() {
                 let mut qualified_id = (*aggregator_id, batch_id);
@@ -466,11 +468,10 @@ enum ThreadRequest<BatchId, AggregatorId, A: Aggregator> {
     Shutdown,
 }
 
-enum ThreadResponse<BatchId, AggregatorId, A: Aggregator> {
+enum ThreadResponse<BatchId, A: Aggregator> {
     RecursiveProof(BatchId, A::Node),
     PendingQueueSize(usize),
     ProofThroughput(f64),
-    RemovedSubAggregator(AggregatorId, AggregatorBox<A>),
 }
 
 /// An aggregator that wraps a blocking aggregator and runs it in a separate background thread.
@@ -478,7 +479,7 @@ pub struct ThreadedAggregator<BatchIds: Iterator, AggregatorIds: Iterator, A: Ag
     /// Channel to send data to the aggregator
     sender: mpsc::Sender<ThreadRequest<BatchIds::Item, AggregatorIds::Item, A>>,
     /// Channel to receive data from the aggregator
-    receiver: mpsc::Receiver<ThreadResponse<BatchIds::Item, AggregatorIds::Item, A>>,
+    receiver: mpsc::Receiver<ThreadResponse<BatchIds::Item, A>>,
     /// Handle to thee aggregator's thread
     handle: Option<thread::JoinHandle<()>>,
     /// The ID to assign to the next sub aggregator
@@ -623,9 +624,6 @@ where
                 },
                 ThreadResponse::RecursiveProof(batch_id, node) => {
                     self.recursive_proofs.push_back((batch_id, node));
-                },
-                ThreadResponse::RemovedSubAggregator(aggregator_id, aggregator) => {
-                    panic!("not yet implemented");
                 },
             }
         }
