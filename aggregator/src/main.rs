@@ -201,7 +201,12 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
         self.sub_aggregators.remove(id);
     }
 
-    fn sync(&mut self) {}
+    fn sync(&mut self) {
+        // Synchronize all the sub-aggregators
+        for aggregator in self.sub_aggregators.values_mut() {
+            aggregator.sync();
+        }
+    }
 
     fn step(&mut self) {
         println!("Distribute ------------");
@@ -461,16 +466,27 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for MerkleAggregato
 
 /// Commands sent from the main thread to the worker thread.
 enum ThreadRequest<BatchId, AggregatorId, A: Aggregator> {
+    /// Push new batch of internal proofs
     PushInternalProofs(BatchId, Vec<A::Node>),
+    /// Add the given sub-aggregator with the given ID
     InsertSubAggregator(AggregatorId, AggregatorBox<A>),
+    /// Remove the aggregator with the given ID
     RemoveSubAggregator(AggregatorId),
+    /// Synchronize the worker
+    Sync,
+    /// Move the worker forward a step
     Step,
+    /// Shutdown the worker
     Shutdown,
 }
 
+/// Updates sent from the worker thread back to the main thread
 enum ThreadResponse<BatchId, A: Aggregator> {
+    /// Post new recursive proof
     RecursiveProof(BatchId, A::Node),
+    /// Update the pending queue size
     PendingQueueSize(usize),
+    /// Update the proof throughput value
     ProofThroughput(f64),
 }
 
@@ -506,13 +522,16 @@ where
 {
     /// Creates a new threaded aggregator, spawning a background thread to handle its workload.
     pub fn new(free_batch_ids: BatchIds, free_aggregator_ids: AggregatorIds, mut inner: A) -> Self {
+        // Enable two-way communication between parent and child
         let (parent_tx, child_rx) = mpsc::channel();
         let (child_tx, parent_rx) = mpsc::channel();
 
         let handle = thread::spawn(move || {
             let mut batch_aliases = HashMap::new();
             let mut aggregator_aliases = HashMap::new();
+            // Process commands from parent in a loop
             while let Ok(cmd) = child_rx.recv() {
+                // Forward the command to the inner aggregator
                 match cmd {
                     ThreadRequest::PushInternalProofs(outer_id, proofs) => {
                         let inner_id = inner.push_internal_proofs(proofs);
@@ -526,19 +545,18 @@ where
                         let Some(inner_id) = aggregator_aliases.get(&outer_id) else { continue; };
                         inner.remove_sub_aggregator(&inner_id);
                     }
-                    ThreadRequest::Step => {
-                        inner.step();
-                        while let Some((inner_id, node)) = inner.pop_recursive_proof() {
-                            let outer_id = batch_aliases.remove(&inner_id).expect("unknown inner ID");
-                            child_tx.send(ThreadResponse::RecursiveProof(outer_id, node)).unwrap();
-                        }
-                        child_tx.send(ThreadResponse::ProofThroughput(inner.proof_throughput())).unwrap();
-                        child_tx.send(ThreadResponse::PendingQueueSize(inner.pending_queue_size())).unwrap();
-                    }
-                    ThreadRequest::Shutdown => {
-                        break;
-                    }
+                    ThreadRequest::Step => inner.step(),
+                    ThreadRequest::Sync => inner.sync(),
+                    ThreadRequest::Shutdown => break,
                 }
+                // Send any new recursive proofs back to the parent
+                while let Some((inner_id, node)) = inner.pop_recursive_proof() {
+                    let outer_id = batch_aliases.remove(&inner_id).expect("unknown inner ID");
+                    child_tx.send(ThreadResponse::RecursiveProof(outer_id, node)).unwrap();
+                }
+                // Also send the new throughput and pending queue size back to the parent
+                child_tx.send(ThreadResponse::ProofThroughput(inner.proof_throughput())).unwrap();
+                child_tx.send(ThreadResponse::PendingQueueSize(inner.pending_queue_size())).unwrap();
             }
         });
 
@@ -614,6 +632,7 @@ where
     }
 
     fn sync(&mut self) {
+        // Update the object state with data from the inner thread
         while let Ok(resp) = self.receiver.try_recv() {
             match resp {
                 ThreadResponse::PendingQueueSize(size) => {
@@ -627,6 +646,8 @@ where
                 },
             }
         }
+        // Command the inner aggregator to synchronize
+        self.sender.send(ThreadRequest::Sync).unwrap();
     }
 }
 
