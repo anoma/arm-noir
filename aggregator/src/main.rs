@@ -31,6 +31,8 @@ use noirc_abi::input_parser::InputValue;
 use noir_artifact_cli::execution::ExecutionResults;
 use noir_artifact_cli::execution::ReturnValues;
 use noirc_abi::InputMap;
+use std::sync::mpsc;
+use std::thread;
 
 const CRS_DIR: &str = ".bb-crs";
 const G1_UNCOMPRESSED_DATA_PATH: &str = "bn254_g1.dat";
@@ -58,9 +60,11 @@ pub trait Aggregator {
     /// Add a sub-aggregator that will help in aggregating proofs
     fn insert_sub_aggregator(&mut self, sub_aggregator: AggregatorBox<Self>) -> Self::AggregatorId;
     /// Remove the given sub-aggregator from the set of helpers
-    fn remove_sub_aggregator(&mut self, id: &Self::AggregatorId) -> Option<AggregatorBox<Self>>;
+    fn remove_sub_aggregator(&mut self, id: &Self::AggregatorId);
     /// Consume leaf and internal proofs and produce aggregate proofs
     fn step(&mut self);
+    /// Ensure that subsequent queries return correct results
+    fn sync(&mut self);
 }
 
 /// Generate an ID from an essentially infinite iterator
@@ -193,9 +197,11 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
         aggregator_id
     }
 
-    fn remove_sub_aggregator(&mut self, id: &Self::AggregatorId) -> Option<AggregatorBox<Self>> {
-        self.sub_aggregators.remove(id)
+    fn remove_sub_aggregator(&mut self, id: &Self::AggregatorId) {
+        self.sub_aggregators.remove(id);
     }
+
+    fn sync(&mut self) {}
 
     fn step(&mut self) {
         println!("Distribute ------------");
@@ -421,9 +427,11 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for MerkleAggregato
         unimplemented!("MerkleAggregator is a leaf worker and does not support sub-aggregators.");
     }
 
-    fn remove_sub_aggregator(&mut self, _id: &Self::AggregatorId) -> Option<AggregatorBox<Self>> {
+    fn remove_sub_aggregator(&mut self, _id: &Self::AggregatorId) {
         unimplemented!("MerkleAggregator is a leaf worker and does not support sub-aggregators.");
     }
+
+    fn sync(&mut self) {}
 
     fn step(&mut self) {
         // Pop one batch from the internal queue to process in this step
@@ -445,6 +453,181 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for MerkleAggregato
             // The single remaining element is the root
             let root = current_layer.pop().expect("Layer should contain exactly one root digest");
             self.completed_proofs.push_back((batch_id, root));
+        }
+    }
+}
+
+/// Commands sent from the main thread to the worker thread.
+enum ThreadRequest<BatchId, AggregatorId, A: Aggregator> {
+    PushInternalProofs(BatchId, Vec<A::Node>),
+    InsertSubAggregator(AggregatorId, AggregatorBox<A>),
+    RemoveSubAggregator(AggregatorId),
+    Step,
+    Shutdown,
+}
+
+enum ThreadResponse<BatchId, AggregatorId, A: Aggregator> {
+    RecursiveProof(BatchId, A::Node),
+    PendingQueueSize(usize),
+    ProofThroughput(f64),
+    RemovedSubAggregator(AggregatorId, AggregatorBox<A>),
+}
+
+/// An aggregator that wraps a blocking aggregator and runs it in a separate background thread.
+pub struct ThreadedAggregator<BatchIds: Iterator, AggregatorIds: Iterator, A: Aggregator> {
+    /// Channel to send data to the aggregator
+    sender: mpsc::Sender<ThreadRequest<BatchIds::Item, AggregatorIds::Item, A>>,
+    /// Channel to receive data from the aggregator
+    receiver: mpsc::Receiver<ThreadResponse<BatchIds::Item, AggregatorIds::Item, A>>,
+    /// Handle to thee aggregator's thread
+    handle: Option<thread::JoinHandle<()>>,
+    /// The ID to assign to the next sub aggregator
+    pub free_aggregator_ids: AggregatorIds,
+    /// The ID to assign to the next batch
+    pub free_batch_ids: BatchIds,
+    /// The size of the queue of pending nodes
+    pub pending_queue_size: usize,
+    /// The proofs processed per unit of time
+    pub proof_throughput: f64,
+    /// Queue of produced recursive proofs
+    pub recursive_proofs: VecDeque<(BatchIds::Item, A::Node)>,
+}
+
+impl<A, BatchIds: Iterator, AggregatorIds: Iterator> ThreadedAggregator<BatchIds, AggregatorIds, A>
+where
+    A: Aggregator + Send + 'static,
+    A::Node: Send,
+    A::BatchId: Send + Eq + Hash,
+    A::AggregatorId: Send + Eq + Hash,
+    AggregatorIds::Item: Send + Hash + Eq + 'static,
+    BatchIds::Item: Send + Hash + Eq + 'static,
+    AggregatorBox<A>: Send,
+{
+    /// Creates a new threaded aggregator, spawning a background thread to handle its workload.
+    pub fn new(free_batch_ids: BatchIds, free_aggregator_ids: AggregatorIds, mut inner: A) -> Self {
+        let (parent_tx, child_rx) = mpsc::channel();
+        let (child_tx, parent_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let mut batch_aliases = HashMap::new();
+            let mut aggregator_aliases = HashMap::new();
+            while let Ok(cmd) = child_rx.recv() {
+                match cmd {
+                    ThreadRequest::PushInternalProofs(outer_id, proofs) => {
+                        let inner_id = inner.push_internal_proofs(proofs);
+                        batch_aliases.insert(inner_id, outer_id);
+                    }
+                    ThreadRequest::InsertSubAggregator(outer_id, sub) => {
+                        let inner_id = inner.insert_sub_aggregator(sub);
+                        aggregator_aliases.insert(outer_id, inner_id);
+                    }
+                    ThreadRequest::RemoveSubAggregator(outer_id) => {
+                        let Some(inner_id) = aggregator_aliases.get(&outer_id) else { continue; };
+                        inner.remove_sub_aggregator(&inner_id);
+                    }
+                    ThreadRequest::Step => {
+                        inner.step();
+                        while let Some((inner_id, node)) = inner.pop_recursive_proof() {
+                            let outer_id = batch_aliases.remove(&inner_id).expect("unknown inner ID");
+                            child_tx.send(ThreadResponse::RecursiveProof(outer_id, node)).unwrap();
+                        }
+                        child_tx.send(ThreadResponse::ProofThroughput(inner.proof_throughput())).unwrap();
+                        child_tx.send(ThreadResponse::PendingQueueSize(inner.pending_queue_size())).unwrap();
+                    }
+                    ThreadRequest::Shutdown => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            sender: parent_tx,
+            receiver: parent_rx,
+            handle: Some(handle),
+            free_batch_ids,
+            free_aggregator_ids,
+            pending_queue_size: 0,
+            proof_throughput: 1.0,
+            recursive_proofs: VecDeque::new(),
+        }
+    }
+}
+
+impl<A, BatchIds: Iterator, AggregatorIds: Iterator> Drop for ThreadedAggregator<BatchIds, AggregatorIds, A>
+where
+    A: Aggregator,
+{
+    fn drop(&mut self) {
+        // Signal the worker thread to exit, ignoring any sending errors if it already panicked/died.
+        self.sender.send(ThreadRequest::Shutdown).unwrap();
+        if let Some(handle) = self.handle.take() {
+            handle.join().unwrap();
+        }
+    }
+}
+
+impl<A, BatchIds: Iterator, AggregatorIds: Iterator> Aggregator for ThreadedAggregator<BatchIds, AggregatorIds, A>
+where
+    A: Aggregator<BatchId = BatchIds::Item, AggregatorId = AggregatorIds::Item> + Send + 'static,
+    A::Node: Send,
+    A::BatchId: Send + Eq + Hash,
+    A::AggregatorId: Send + Copy + Eq + Hash,
+    BatchIds::Item: Copy,
+    AggregatorBox<A>: Send + 'static,
+{
+    type AggregatorId = AggregatorIds::Item;
+    type BatchId = BatchIds::Item;
+    type Node = A::Node;
+
+    fn push_internal_proofs(&mut self, proofs: Vec<Self::Node>) -> Self::BatchId {
+        let batch_id = gen_id(&mut self.free_batch_ids);
+        self.sender.send(ThreadRequest::PushInternalProofs(batch_id, proofs)).unwrap();
+        batch_id
+    }
+
+    fn insert_sub_aggregator(&mut self, sub_aggregator: AggregatorBox<Self>) -> Self::AggregatorId {
+        let aggregator_id = gen_id(&mut self.free_aggregator_ids);
+        self.sender.send(ThreadRequest::InsertSubAggregator(aggregator_id, sub_aggregator)).unwrap();
+        aggregator_id
+    }
+
+    fn remove_sub_aggregator(&mut self, id: &Self::AggregatorId) {
+        self.sender.send(ThreadRequest::RemoveSubAggregator(*id)).unwrap();
+    }
+
+    fn step(&mut self) {
+        self.sender.send(ThreadRequest::Step).unwrap();
+    }
+
+    fn pop_recursive_proof(&mut self) -> Option<(Self::BatchId, Self::Node)> {
+        self.recursive_proofs.pop_front()
+    }
+
+    fn pending_queue_size(&self) -> usize {
+        self.pending_queue_size
+    }
+
+    fn proof_throughput(&self) -> f64 {
+        self.proof_throughput
+    }
+
+    fn sync(&mut self) {
+        while let Ok(resp) = self.receiver.try_recv() {
+            match resp {
+                ThreadResponse::PendingQueueSize(size) => {
+                    self.pending_queue_size = size;
+                },
+                ThreadResponse::ProofThroughput(throughput) => {
+                    self.proof_throughput = throughput;
+                },
+                ThreadResponse::RecursiveProof(batch_id, node) => {
+                    self.recursive_proofs.push_back((batch_id, node));
+                },
+                ThreadResponse::RemovedSubAggregator(aggregator_id, aggregator) => {
+                    panic!("not yet implemented");
+                },
+            }
         }
     }
 }
