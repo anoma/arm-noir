@@ -346,7 +346,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator, Proof> Aggregator for Recursiv
                 // And push them back into the queue
                 assert_eq!(qualified_id.0, self.aggregator_id);
                 println!("Planning aggregation of {} proofs", proofs.len());
-                self.internal_proofs.push_back((qualified_id.1, proofs));
+                self.internal_proofs.push_front((qualified_id.1, proofs));
                 // Do not retain these descendants otherwise combination work will be duplicated.
                 // Do not even keep a singleton entry because that suggests that the merged proof
                 // is ready.
@@ -442,7 +442,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for MerkleAggregato
 
     fn step(&mut self) {
         // Pop one batch from the internal queue to process in this step
-        while let Some((batch_id, mut current_layer)) = self.internal_queue.pop_front() {
+        if let Some((batch_id, mut current_layer)) = self.internal_queue.pop_front() {
             println!("Aggregating {} proofs", current_layer.len());
             // Iteratively compute the Merkle root
             while current_layer.len() > 1 {
@@ -823,7 +823,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> Aggregator for BarretenbergAgg
 
     fn step(&mut self) {
         // Pop one batch from the internal queue to process in this step
-        while let Some((batch_id, mut current_layer)) = self.internal_queue.pop_front() {
+        if let Some((batch_id, mut current_layer)) = self.internal_queue.pop_front() {
             println!("Aggregating {} proofs", current_layer.len());
             // Iteratively compute the Merkle root
             while current_layer.len() > 1 {
