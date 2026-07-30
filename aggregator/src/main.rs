@@ -7,10 +7,7 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::fmt::Display;
 use sha2::{Sha256, Digest};
-use std::ops::RangeFrom;
 use std::path::PathBuf;
-use barretenberg_rs::generated_types::CircuitProveResponse;
-use proptest::prelude::*;
 use noir_artifact_cli::Artifact;
 use noirc_artifacts::program::CompiledProgram;
 use nargo::foreign_calls::{layers, DefaultForeignCallBuilder};
@@ -32,9 +29,13 @@ use noirc_abi::InputMap;
 use std::sync::mpsc;
 use std::thread;
 
+/// The directory containing the common reference string
 const CRS_DIR: &str = ".bb-crs";
+/// Name of file containing G1 point data
 const G1_UNCOMPRESSED_DATA_PATH: &str = "bn254_g1.dat";
+/// Name of file containing G2 point data
 const G2_UNCOMPRESSED_DATA_PATH: &str = "bn254_g2.dat";
+/// Path to file containing the aggregation circuit
 const AGGREGATION_CIRCUIT_PATH: &str = "../circuits/target/recursive_no_zk_aggregation.json";
 
 /// Type alias to ease generic usage of aggregators
@@ -871,6 +872,8 @@ fn main() {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use std::ops::RangeFrom;
+    use proptest::prelude::*;
 
     // A ZK proof to use for testing
     fn noir_recursive_no_zk_proof() -> InputMap {
@@ -938,6 +941,10 @@ mod tests {
         barretenberg_aggregator.push_internal_proofs(batch.to_vec());
         // Make the aggregator process the proofs in the queue
         barretenberg_aggregator.step();
+        // Extract the generated root proof
+        let mut barretenberg_aggregator_proof = barretenberg_aggregator
+            .pop_recursive_proof()
+            .expect("Barretenberg aggregator should generate at least one proof").1;
         // Make a more complex aggregator
         let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
         // Push 4 sub-aggregators to actually handle the computations
@@ -948,21 +955,18 @@ mod tests {
         // Push some work onto the recursive aggregator
         recursive_aggregator.push_internal_proofs(batch.to_vec());
         // Repeatedly step through distribution and consolidation
-        for _i in 0..120 {
+        let mut recursive_aggregator_proof = loop {
+            if let Some(proof) = recursive_aggregator.pop_recursive_proof() {
+                break proof;
+            }
             recursive_aggregator.step();
             thread::sleep(Duration::from_secs(1));
-        }
-        // Finally, ensure that the Merkle roots agree
-        let mut barretenberg_aggregator_proof = barretenberg_aggregator
-            .pop_recursive_proof()
-            .expect("Barretenberg aggregator should generate at least one proof").1;
-        let mut recursive_aggregator_proof = recursive_aggregator
-            .pop_recursive_proof()
-            .expect("recursive aggregator should generate at least one proof").1;
-        // Proofs are non-deterministic, so exclude those from comparison
+        };
+        // Finally, ensure that the Merkle roots agree. Exclude proofs from the comparison
+        // since they are non-deterministic.
         barretenberg_aggregator_proof.remove("proof");
-        recursive_aggregator_proof.remove("proof");
-        assert_eq!(barretenberg_aggregator_proof, recursive_aggregator_proof);
+        recursive_aggregator_proof.1.remove("proof");
+        assert_eq!(barretenberg_aggregator_proof, recursive_aggregator_proof.1);
         assert_eq!(barretenberg_aggregator.pop_recursive_proof(), None);
         assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
     }
