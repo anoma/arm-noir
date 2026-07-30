@@ -903,6 +903,10 @@ mod tests {
         barretenberg_aggregator.push_internal_proofs(batch.to_vec());
         // Make the aggregator process the proofs in the queue
         barretenberg_aggregator.step();
+        // Extract the generated root proof
+        let mut barretenberg_aggregator_proof = barretenberg_aggregator
+            .pop_recursive_proof()
+            .expect("Barretenberg aggregator should generate at least one proof").1;
         // Make a more complex aggregator
         let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
         // Push 4 sub-aggregators to actually handle the computations
@@ -913,17 +917,17 @@ mod tests {
         // Push some work onto the recursive aggregator
         recursive_aggregator.push_internal_proofs(batch.to_vec());
         // Repeatedly step through distribution and consolidation
-        recursive_aggregator.step();
-        recursive_aggregator.step();
-        recursive_aggregator.step();
-        recursive_aggregator.step();
-        recursive_aggregator.step();
-        recursive_aggregator.step();
-        recursive_aggregator.step();
-        recursive_aggregator.step();
+        let mut recursive_aggregator_proof = loop {
+            if let Some(proof) = recursive_aggregator.pop_recursive_proof() {
+                break proof;
+            }
+            recursive_aggregator.step();
+            thread::sleep(Duration::from_secs(1));
+        };
         // Finally, ensure that the Merkle roots agree
-        assert!(barretenberg_aggregator.pop_recursive_proof().is_some());
-        assert!(recursive_aggregator.pop_recursive_proof().is_some());
+        barretenberg_aggregator_proof.remove("proof");
+        recursive_aggregator_proof.1.remove("proof");
+        assert_eq!(barretenberg_aggregator_proof, recursive_aggregator_proof.1);
         assert_eq!(barretenberg_aggregator.pop_recursive_proof(), None);
         assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
     }
@@ -1022,16 +1026,14 @@ mod tests {
             // Push some work onto the recursive aggregator
             recursive_aggregator.push_internal_proofs(batch.to_vec());
             // Repeatedly step through distribution and consolidation
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
+            let recursive_aggregator_proof = loop {
+                if let Some(proof) = recursive_aggregator.pop_recursive_proof() {
+                    break proof;
+                }
+                recursive_aggregator.step();
+            };
             // Finally, ensure that the Merkle roots agree
-            assert_eq!(merkle_aggregator.pop_recursive_proof(), recursive_aggregator.pop_recursive_proof());
+            assert_eq!(merkle_aggregator.pop_recursive_proof(), Some(recursive_aggregator_proof));
             assert_eq!(merkle_aggregator.pop_recursive_proof(), None);
             assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
         }
@@ -1059,16 +1061,14 @@ mod tests {
             // Push some work onto the recursive aggregator
             recursive_aggregator.push_internal_proofs(batch.to_vec());
             // Repeatedly step through distribution and consolidation
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
-            recursive_aggregator.step();
+            let recursive_aggregator_proof = loop {
+                if let Some(proof) = recursive_aggregator.pop_recursive_proof() {
+                    break proof;
+                }
+                recursive_aggregator.step();
+            };
             // Finally, ensure that the Merkle roots agree
-            assert_eq!(merkle_aggregator.pop_recursive_proof(), recursive_aggregator.pop_recursive_proof());
+            assert_eq!(merkle_aggregator.pop_recursive_proof(), Some(recursive_aggregator_proof));
             assert_eq!(merkle_aggregator.pop_recursive_proof(), None);
             assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
         }
