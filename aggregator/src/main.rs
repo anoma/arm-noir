@@ -929,6 +929,36 @@ mod tests {
     }
 
     #[test]
+    pub fn bench_balanced_threaded_barretenberg_aggregator() {
+        const BATCH_SIZE: usize = 8;
+        const NUM_AGGREGATORS: usize = 8;
+        const BATCH_COUNT: usize = 4;
+        // Initialize the structured reference string
+        init_srs();
+        let batch: [InputMap; BATCH_SIZE] = std::array::repeat(noir_recursive_no_zk_proof());
+        type BarretenbergAggregatorT = BarretenbergAggregator<RangeFrom<usize>, RangeFrom<usize>>;
+        type RecursiveAggregatorT = RecursiveAggregator<InputMap, RangeFrom<usize>, RangeFrom<usize>>;
+        // Make a more complex aggregator
+        let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
+        // Push NUM_AGGREGATORS sub-aggregators to actually handle the computations
+        for _i in 0..NUM_AGGREGATORS {
+            recursive_aggregator.insert_sub_aggregator(Box::new(ThreadedAggregator::new(0.., 0.., || BarretenbergAggregatorT::new(0usize..))));
+        }
+        // Push some work onto the recursive aggregator
+        for _i in 0..BATCH_COUNT {
+            recursive_aggregator.push_internal_proofs(batch.to_vec());
+        }
+        // Repeatedly step through distribution and consolidation
+        for _i in 0..BATCH_COUNT {
+            while let None = recursive_aggregator.pop_recursive_proof() {
+                recursive_aggregator.step();
+                thread::sleep(Duration::from_secs(1));
+            };
+        }
+        assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
+    }
+
+    #[test]
     fn test_balanced_threaded_barretenberg_aggregator() {
         // Initialize the structured reference string
         init_srs();
