@@ -35,6 +35,7 @@ use std::thread;
 const CRS_DIR: &str = ".bb-crs";
 const G1_UNCOMPRESSED_DATA_PATH: &str = "bn254_g1.dat";
 const G2_UNCOMPRESSED_DATA_PATH: &str = "bn254_g2.dat";
+const AGGREGATION_CIRCUIT_PATH: &str = "../circuits/target/recursive_no_zk_aggregation.json";
 
 /// Type alias to ease generic usage of aggregators
 type AggregatorBox<A> = Box<dyn Aggregator<AggregatorId = <A as Aggregator>::AggregatorId, Node = <A as Aggregator>::Node, BatchId = <A as Aggregator>::BatchId>>;
@@ -659,6 +660,8 @@ pub struct BarretenbergAggregator<BatchIds: Iterator, AggregatorIds: Iterator> {
     pub internal_queue: VecDeque<(BatchIds::Item, Vec<InputMap>)>,
     /// Queue of finished Merkle roots ready to be collected
     pub completed_proofs: VecDeque<(BatchIds::Item, InputMap)>,
+    /// The aggregation circuit
+    pub circuit: CompiledProgram,
 }
 
 impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchIds, AggregatorIds> {
@@ -667,6 +670,11 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         let backend = FfiBackend::new().unwrap();
         // Initialize the Barretenberg API
         let api = BarretenbergApi::new(backend);
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
+        let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
+        let Artifact::Program(program) = artifact else { panic!("incorrect artifact type") };
+        let circuit = CompiledProgram::from(program);
         Self {
             api,
             free_aggregator_ids: PhantomData,
@@ -674,19 +682,15 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             leaf_queue: Vec::new(),
             internal_queue: VecDeque::new(),
             completed_proofs: VecDeque::new(),
+            circuit,
         }
     }
 
-    /// A simple deterministic hash for testing purposes.
-    /// In a real scenario, this would be replaced by a cryptographic hash like SHA-256 or Poseidon.
-    // Combine the given two recursive proofs into a single one
+    /// Combine the given two recursive proofs into a single one
     fn combine_proofs(&mut self, left: InputMap, mut right: InputMap) -> InputMap {
         // Load up the aggregation circuit from disk
-        let program_artifact_path = PathBuf::from("../circuits/target/recursive_no_zk_aggregation.json");
-        let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
+        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
         let artifact_name = program_artifact_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        let Artifact::Program(program) = artifact else { panic!("incorrect artifact type") };
-        let circuit = CompiledProgram::from(program);
         let circuit_name = artifact_name.to_string();
 
         // Combine the left and right input maps into one map to produce an aggregate proof
@@ -699,7 +703,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             .collect();
         assert!(right.is_empty(), "right map has keys not in the left map");
         let expected_return = None;
-        let initial_witness = circuit.abi.encode(&input_map, None).expect("unable to encode initial witness");
+        let initial_witness = self.circuit.abi.encode(&input_map, None).expect("unable to encode initial witness");
 
         // Construct foreign call executor for circuit execution
         let transcript_executor: layers::Either<ReplayForeignCallExecutor<_>, _> = layers::Either::Right(layers::Unhandled);
@@ -715,7 +719,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         // Execute the circuit on the given inputs
         let blackbox_solver = Bn254BlackBoxSolver;
         let witness_stack = nargo::ops::execute_program(
-            &circuit.program,
+            &self.circuit.program,
             initial_witness,
             &blackbox_solver,
             &mut foreign_call_executor,
@@ -724,7 +728,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         let main_witness =
             &witness_stack.peek().expect("Should have at least one witness on the stack").witness;
 
-        let (_, actual_return) = circuit.abi.decode(main_witness).expect("unable to decode main witness");
+        let (_, actual_return) = self.circuit.abi.decode(main_witness).expect("unable to decode main witness");
         let results = ExecutionResults {
             witness_stack,
             return_values: ReturnValues { actual_return, expected_return },
@@ -732,7 +736,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         // Extract the execution witness
         let compressed_witness_bytes = results.witness_stack.serialize().expect("output witness creation failed");
         // Grab the compressed program bytecode from the circuit
-        let compressed_program_bytecode = Program::serialize_program_with_format(&circuit.program, SerializationFormat::default());
+        let compressed_program_bytecode = Program::serialize_program_with_format(&self.circuit.program, SerializationFormat::default());
 
         // Decompress program bytecode
         let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
