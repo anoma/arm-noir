@@ -478,8 +478,8 @@ pub enum ThreadRequest<BatchId, A: Aggregator> {
 pub enum ThreadResponse<BatchId, A: Aggregator> {
     /// Post new recursive proof
     RecursiveProof(BatchId, A::Node),
-    /// Update the pending queue size
-    PendingQueueSize(usize),
+    /// Former number is the outer queue delta. Latter is new inner pending queue size.
+    PendingQueueSize(usize, usize),
     /// Update the proof throughput value
     ProofThroughput(f64),
 }
@@ -496,8 +496,10 @@ pub struct ThreadedAggregator<BatchIds: Iterator, AggregatorIds: Iterator, A: Ag
     pub free_aggregator_ids: AggregatorIds,
     /// The ID to assign to the next batch
     pub free_batch_ids: BatchIds,
-    /// The size of the queue of pending nodes
-    pub pending_queue_size: usize,
+    /// The size of the inner queue of pending nodes
+    pub inner_pending_queue_size: usize,
+    /// The size of the outer queue of pending nodes
+    pub outer_pending_queue_size: usize,
     /// The proofs processed per unit of time
     pub proof_throughput: f64,
     /// Queue of produced recursive proofs
@@ -524,9 +526,12 @@ where
             let mut batch_aliases = HashMap::new();
             // Process commands from parent in a loop
             while let Ok(cmd) = child_rx.recv() {
+                // Number of internal proofs pushed during this iteration
+                let mut internal_proofs_pushed = 0;
                 // Forward the command to the inner aggregator
                 match cmd {
                     ThreadRequest::PushInternalProofs(outer_id, proofs) => {
+                        internal_proofs_pushed += proofs.len();
                         let inner_id = inner.push_internal_proofs(proofs);
                         batch_aliases.insert(inner_id, outer_id);
                     }
@@ -541,7 +546,7 @@ where
                 }
                 // Also send the new throughput and pending queue size back to the parent
                 child_tx.send(ThreadResponse::ProofThroughput(inner.proof_throughput())).unwrap();
-                child_tx.send(ThreadResponse::PendingQueueSize(inner.pending_queue_size())).unwrap();
+                child_tx.send(ThreadResponse::PendingQueueSize(internal_proofs_pushed, inner.pending_queue_size())).unwrap();
             }
         });
 
@@ -551,7 +556,8 @@ where
             handle: Some(handle),
             free_batch_ids,
             free_aggregator_ids,
-            pending_queue_size: 0,
+            inner_pending_queue_size: 0,
+            outer_pending_queue_size: 0,
             proof_throughput: 1.0,
             recursive_proofs: VecDeque::new(),
         }
@@ -585,7 +591,7 @@ where
 
     fn push_internal_proofs(&mut self, proofs: Vec<Self::Node>) -> Self::BatchId {
         // Speculatively update the queue size. This will eventually be overwritten.
-        self.pending_queue_size += proofs.len();
+        self.outer_pending_queue_size += proofs.len();
         // Create a batch ID to immediately return to caller.
         let batch_id = gen_id(&mut self.free_batch_ids);
         // Let the child thread manage the mappings between outer and inner batch IDs.
@@ -610,7 +616,7 @@ where
     }
 
     fn pending_queue_size(&self) -> usize {
-        self.pending_queue_size
+        self.inner_pending_queue_size + self.outer_pending_queue_size
     }
 
     fn proof_throughput(&self) -> f64 {
@@ -621,8 +627,9 @@ where
         // Update the object state with data from the inner thread
         while let Ok(resp) = self.receiver.try_recv() {
             match resp {
-                ThreadResponse::PendingQueueSize(size) => {
-                    self.pending_queue_size = size;
+                ThreadResponse::PendingQueueSize(delta, new_size) => {
+                    self.outer_pending_queue_size -= delta;
+                    self.inner_pending_queue_size = new_size;
                 },
                 ThreadResponse::ProofThroughput(throughput) => {
                     self.proof_throughput = throughput;
