@@ -926,7 +926,7 @@ mod tests {
         // Push the random batch onto the aggregator
         barretenberg_aggregator.push_internal_proofs(batch.to_vec());
         // Make the aggregator process the proofs in the queue
-        //barretenberg_aggregator.step();
+        barretenberg_aggregator.step();
         // Make a more complex aggregator
         let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
         // Push 4 sub-aggregators to actually handle the computations
@@ -937,13 +937,21 @@ mod tests {
         // Push some work onto the recursive aggregator
         recursive_aggregator.push_internal_proofs(batch.to_vec());
         // Repeatedly step through distribution and consolidation
-        for i in 0..200 {
+        for _i in 0..120 {
             recursive_aggregator.step();
-            thread::sleep(Duration::from_secs(2));
+            thread::sleep(Duration::from_secs(1));
         }
         // Finally, ensure that the Merkle roots agree
-        assert!(barretenberg_aggregator.pop_recursive_proof().is_some());
-        assert!(recursive_aggregator.pop_recursive_proof().is_some());
+        let mut barretenberg_aggregator_proof = barretenberg_aggregator
+            .pop_recursive_proof()
+            .expect("Barretenberg aggregator should generate at least one proof").1;
+        let mut recursive_aggregator_proof = recursive_aggregator
+            .pop_recursive_proof()
+            .expect("recursive aggregator should generate at least one proof").1;
+        // Proofs are non-deterministic, so exclude those from comparison
+        barretenberg_aggregator_proof.remove("proof");
+        recursive_aggregator_proof.remove("proof");
+        assert_eq!(barretenberg_aggregator_proof, recursive_aggregator_proof);
         assert_eq!(barretenberg_aggregator.pop_recursive_proof(), None);
         assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
     }
