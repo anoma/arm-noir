@@ -4,6 +4,7 @@ use acir::SerializationFormat;
 use acir::circuit::Program;
 use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::backends::FfiBackend;
+use barretenberg_rs::generated_types::CircuitComputeVkResponse;
 use barretenberg_rs::generated_types::ProofSystemSettings;
 use barretenberg_rs::generated_types::{CircuitInput, CircuitInputNoVK};
 use bn254_blackbox_solver::Bn254BlackBoxSolver;
@@ -783,14 +784,29 @@ pub struct BarretenbergAggregator<BatchIds: Iterator, AggregatorIds: Iterator> {
     pub completed_proofs: VecDeque<(BatchIds::Item, InputMap)>,
     /// The aggregation circuit
     pub circuit: CompiledProgram,
+    /// The response from computing the verification key
+    pub compute_vk_response: CircuitComputeVkResponse,
+    /// Settings to use for proving
+    pub proof_system_settings: ProofSystemSettings,
+    /// Name of the aggregation circuit
+    pub circuit_name: String,
+    /// Bytecode of the aggregation circuit
+    pub program_bytecode: Vec<u8>,
 }
 
 impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchIds, AggregatorIds> {
     pub fn new(free_batch_ids: BatchIds) -> Self {
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
+        let artifact_name = program_artifact_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let circuit_name = artifact_name.to_string();
         // Use the FFI backend which links directly to static libraries
         let backend = FfiBackend::new().unwrap();
         // Initialize the Barretenberg API
-        let api = BarretenbergApi::new(backend);
+        let mut api = BarretenbergApi::new(backend);
         // Load up the aggregation circuit from disk
         let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
         let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
@@ -798,6 +814,33 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             panic!("incorrect artifact type")
         };
         let circuit = CompiledProgram::from(program);
+        // Grab the compressed program bytecode from the circuit
+        let compressed_program_bytecode = Program::serialize_program_with_format(
+            &circuit.program,
+            SerializationFormat::default(),
+        );
+
+        // Decompress program bytecode
+        let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
+        let mut program_bytecode = Vec::new();
+        gz_decoder.read_to_end(&mut program_bytecode).unwrap();
+
+        // Proof system settings to use for generating the verification key
+        let proof_system_settings = ProofSystemSettings {
+            ipa_accumulation: false,
+            oracle_hash_type: "poseidon2".to_string(),
+            disable_zk: true,
+            optimized_solidity_verifier: false,
+        };
+        // The circuit to generate a verification key for
+        let circuit_input = CircuitInputNoVK {
+            name: circuit_name.clone(),
+            bytecode: program_bytecode.clone(),
+        };
+        // Compute the verification key
+        let compute_vk_response = api
+            .circuit_compute_vk(circuit_input, proof_system_settings.clone())
+            .unwrap();
         Self {
             api,
             free_aggregator_ids: PhantomData,
@@ -806,19 +849,15 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             internal_queue: VecDeque::new(),
             completed_proofs: VecDeque::new(),
             circuit,
+            compute_vk_response,
+            proof_system_settings,
+            circuit_name,
+            program_bytecode,
         }
     }
 
     /// Combine the given two recursive proofs into a single one
     fn combine_proofs(&mut self, left: InputMap, mut right: InputMap) -> InputMap {
-        // Load up the aggregation circuit from disk
-        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
-        let artifact_name = program_artifact_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let circuit_name = artifact_name.to_string();
-
         // Combine the left and right input maps into one map to produce an aggregate proof
         let input_map: InputMap = left
             .into_iter()
@@ -881,34 +920,6 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             .witness_stack
             .serialize()
             .expect("output witness creation failed");
-        // Grab the compressed program bytecode from the circuit
-        let compressed_program_bytecode = Program::serialize_program_with_format(
-            &self.circuit.program,
-            SerializationFormat::default(),
-        );
-
-        // Decompress program bytecode
-        let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
-        let mut program_bytecode = Vec::new();
-        gz_decoder.read_to_end(&mut program_bytecode).unwrap();
-
-        // Proof system settings to use for generating the verification key
-        let proof_system_settings = ProofSystemSettings {
-            ipa_accumulation: false,
-            oracle_hash_type: "poseidon2".to_string(),
-            disable_zk: true,
-            optimized_solidity_verifier: false,
-        };
-        // The circuit to generate a verification key for
-        let circuit_input = CircuitInputNoVK {
-            name: circuit_name.clone(),
-            bytecode: program_bytecode.clone(),
-        };
-        // Compute the verification key
-        let compute_vk_response = self
-            .api
-            .circuit_compute_vk(circuit_input, proof_system_settings.clone())
-            .unwrap();
 
         // Decompress witness bytes
         let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_witness_bytes);
@@ -916,22 +927,26 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         gz_decoder.read_to_end(&mut witness_bytes).unwrap();
         // The circuit to generate a proof from
         let circuit_input = CircuitInput {
-            name: circuit_name,
-            bytecode: program_bytecode,
-            verification_key: compute_vk_response.bytes.clone(),
+            name: self.circuit_name.clone(),
+            bytecode: self.program_bytecode.clone(),
+            verification_key: self.compute_vk_response.bytes.clone(),
         };
         // Compute the proof from the witness bytes
         let prove_response = self
             .api
-            .circuit_prove(circuit_input, &witness_bytes, proof_system_settings.clone())
+            .circuit_prove(
+                circuit_input,
+                &witness_bytes,
+                self.proof_system_settings.clone(),
+            )
             .unwrap();
         let verify_response = self
             .api
             .circuit_verify(
-                &compute_vk_response.bytes,
+                &self.compute_vk_response.bytes,
                 prove_response.public_inputs.clone(),
                 prove_response.proof.clone(),
-                proof_system_settings,
+                self.proof_system_settings.clone(),
             )
             .unwrap();
         println!("Verification response: {:?}", verify_response);
@@ -940,7 +955,7 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         output_map.insert(
             "key_hash".to_string(),
             InputValue::Field(FieldElement::from_be_bytes_reduce(
-                &compute_vk_response.hash,
+                &self.compute_vk_response.hash,
             )),
         );
         output_map.insert(
@@ -962,9 +977,9 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         output_map.insert(
             "verification_key".to_string(),
             InputValue::Vec(
-                compute_vk_response
+                self.compute_vk_response
                     .fields
-                    .into_iter()
+                    .iter()
                     .map(|x| InputValue::Field(FieldElement::from_be_bytes_reduce(&x)))
                     .collect(),
             ),
