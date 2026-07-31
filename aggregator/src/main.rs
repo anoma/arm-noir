@@ -37,6 +37,8 @@ const G1_UNCOMPRESSED_DATA_PATH: &str = "bn254_g1.dat";
 const G2_UNCOMPRESSED_DATA_PATH: &str = "bn254_g2.dat";
 /// Path to file containing the aggregation circuit
 const AGGREGATION_CIRCUIT_PATH: &str = "../circuits/target/recursive_no_zk_aggregation.json";
+/// Wait time beyond which a sub-aggregator should not be loaded
+const MAX_WAIT_TIME: f64 = 2.0;
 
 /// Type alias to ease generic usage of aggregators
 type AggregatorBox<A> = Box<
@@ -98,7 +100,7 @@ impl<AggregatorId> AggregatorLoad<AggregatorId> {
         let expected_wait_time = if proof_throughput == 0.0 {
             f64::INFINITY
         } else {
-            aggregator.pending_queue_size() as f64 / proof_throughput
+            aggregator.pending_queue_size() as f64 / (2.0 * proof_throughput)
         };
         Self {
             expected_wait_time,
@@ -274,10 +276,9 @@ where
             // Now try to place some pending proofs at the least loaded aggregator that can be saturated
             for (idx, id) in aggregator_ids.iter().enumerate() {
                 // Number of proofs required to saturate the aggregator
-                let proof_throughput =
-                    self.sub_aggregators[&id.aggregator_id].proof_throughput() as usize * 2;
+                let proof_throughput = -id.negative_throughput as usize * 2;
                 // Only send the prefix of the queue if it can saturate this aggregator
-                if proof_throughput == 0 || pending_queue_size < proof_throughput {
+                if pending_queue_size < proof_throughput || id.expected_wait_time >= MAX_WAIT_TIME {
                     continue;
                 }
                 // Indicate that an aggregator has been found
