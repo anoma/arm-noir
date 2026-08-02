@@ -29,6 +29,11 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
+use std::net::TcpStream;
+use borsh::{BorshDeserialize, BorshSerialize};
+use std::io::Write;
+use std::net::TcpListener;
+use std::net::ToSocketAddrs;
 
 /// The directory containing the common reference string
 const CRS_DIR: &str = ".bb-crs";
@@ -1076,6 +1081,331 @@ where
     }
 }
 
+/// Represents a non-blocking buffered stream
+pub struct BufferedStream {
+    /// The stream being wrapped
+    pub stream: TcpStream,
+    /// Buffer containing some bytes read
+    pub read_buf: Vec<u8>,
+    /// Buffer containing bytes to be written
+    pub write_buf: Vec<u8>,
+}
+
+impl BufferedStream {
+    /// Wrap the given stream and make it non-blocking
+    fn new(stream: TcpStream) -> Self {
+        Self { stream, read_buf: Vec::new(), write_buf: Vec::new() }
+    }
+    
+    /// Reads bytes from the stream into a buffer
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let output_buf_len = buf.len();
+        let read_buf_len = self.read_buf.len();
+        if output_buf_len <= read_buf_len {
+            // If read buffer contains enough bytes to saturate parameter
+            // Then move the read buffer's prefix into the parameter
+            buf.copy_from_slice(&self.read_buf[..buf.len()]);
+            self.read_buf.drain(..buf.len());
+            Ok(output_buf_len)
+        } else {
+            // Otherwise, read as many bytes as possible from the steam
+            let bytes_read = self.stream.read(&mut buf[read_buf_len..])?;
+            // Move bytes from the read buffer into the output buffer
+            buf[..read_buf_len].copy_from_slice(&self.read_buf[..]);
+            self.read_buf.clear();
+            Ok(read_buf_len + bytes_read)
+        }
+    }
+
+    /// Either fill the given buffer, or buffer what's read
+    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let output_buf_len = buf.len();
+        let read_buf_len = self.read_buf.len();
+        if output_buf_len <= read_buf_len {
+            // If read buffer contains enough bytes to saturate parameter
+            // Then move the read buffer's prefix into the parameter
+            buf.copy_from_slice(&self.read_buf[..buf.len()]);
+            self.read_buf.drain(..buf.len());
+            Ok(())
+        } else {
+            // If read buffer contains insufficient bytes to saturate parameter
+            // Then just read the remaining bytes from the stream into the suffix
+            let mut bytes_read = self.stream.read(&mut buf[read_buf_len..])?;
+            // New total number of bytes buffered
+            bytes_read += read_buf_len;
+            if bytes_read == 0 {
+                Err(std::io::ErrorKind::WouldBlock.into())
+            } else if bytes_read < output_buf_len {
+                // Copy bytes from the output buffer into the read buffer
+                self.read_buf.extend_from_slice(&buf[read_buf_len..bytes_read]);
+                // Try to read more bytes
+                self.read_exact(&mut buf[bytes_read..])
+            } else {
+                // Move bytes from the read buffer into the output buffer
+                buf[..read_buf_len].copy_from_slice(&self.read_buf[..]);
+                self.read_buf.clear();
+                Ok(())
+            }
+        }
+    }
+
+    /// Push the given bytes back into the buffer
+    fn unread(&mut self, buf: &[u8]) {
+        // Prepend buf bytes to what's in the buffer
+        let mut concat = buf.to_vec();
+        concat.append(&mut self.read_buf);
+        self.read_buf = concat;
+    }
+
+    /// Try to receive an object from the stream. Consumes a full frame from the
+    /// stream if available, otherwise nothing is consumed. Returns Ok if a full
+    /// frame was available for consumption AND the bytes were derializable.
+    fn try_recv<T: BorshDeserialize>(&mut self) -> std::io::Result<T> {
+        // Number of bytes occupied by the length prefix
+        const LEN_BYTES_LEN: usize = 4;
+        // Buffer to hold the payload length bytes
+        let mut len_bytes = [0u8; LEN_BYTES_LEN];
+        // Finally read the length bytes, the method does all or nothing
+        self.read_exact(&mut len_bytes)?;
+        let len = u32::try_from_slice(&len_bytes)?;
+        // Allocate a buffer to hold the payload
+        let mut payload_bytes = vec![0u8; len as usize];
+        // Read the payload, all or nothing
+        if let Err(err) = self.read_exact(&mut payload_bytes) {
+            // If there's an error reading the payload, then unread the payload
+            self.unread(&len_bytes);
+            // And propagate the given error
+            Err(err)
+        } else {
+            // Finally, try to parse the actual payload
+            T::try_from_slice(&payload_bytes)
+        }
+    }
+
+    /// Attempt to write all the given bytes into the stream. Buffer the bytes
+    /// which could not be written to the stream.
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        // First extend the buffer with the input
+        self.write_buf.extend_from_slice(buf);
+        // Push the write buffer into the stream
+        self.flush()
+    }
+
+    /// Attempt to push the write buffer into the stream. Error out with WouldBlock
+    /// if the write buffer is not fully flushed
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Then attempt to write the write buffer into the stream
+        let bytes_written = self.stream.write(&self.write_buf)?;
+        // Then finally remove the written bytes from the buffer
+        self.write_buf.drain(..bytes_written);
+        if self.write_buf.is_empty() {
+            Ok(())
+        } else if bytes_written == 0 {
+            // If the write buffer still contains bytes, then this flush would block
+            Err(std::io::ErrorKind::WouldBlock.into())
+        } else {
+            // Wrote some bytes but write buffer still non-empty, try again
+            self.flush()
+        }
+    }
+
+    /// Send the given object into the stream in a way such that it can be
+    /// received with try_recv.
+    pub fn send<T: BorshSerialize>(&mut self, t: T) -> std::io::Result<()> {
+        // Convert the given object into bytes and then prepend a length
+        // prefix. Write with write_all to ensure that bytes are not lost.
+        self.write_all(&borsh::to_vec(&borsh::to_vec(&t)?)?)
+    }
+}
+
+/// Commands sent from the client to the server over TCP.
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+pub enum TcpRequest<BatchId, Node> {
+    /// Push new batch of internal proofs
+    PushInternalProofs(BatchId, Vec<Node>),
+    /// Synchronize the worker
+    Sync,
+    /// Move the worker forward a step
+    Step,
+    /// Shutdown the worker
+    Shutdown,
+}
+
+/// Updates sent from the server back to the client over TCP.
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+pub enum TcpResponse<BatchId, Node> {
+    /// Post new recursive proof
+    RecursiveProof(BatchId, Node),
+    /// Former number is the outer queue delta. Latter is new inner pending queue size.
+    PendingQueueSize(usize, usize), // (delta, new_size)
+    /// Update the proof throughput value
+    ProofThroughput(f64),
+}
+
+/// An aggregator that forwards requests and responses over TCP
+pub struct TcpStreamAggregator<BatchIds: Iterator, AggregatorIds: Iterator, Node> where Node: BorshSerialize, BatchIds::Item: BorshSerialize {
+    /// The stream used to communicate with the aggregator server
+    pub stream: BufferedStream,
+    /// The ID to assign to the next sub aggregator
+    pub free_aggregator_ids: AggregatorIds,
+    /// The ID to assign to the next batch
+    pub free_batch_ids: BatchIds,
+    /// The size of the inner queue of pending nodes
+    pub inner_pending_queue_size: usize,
+    /// The size of the outer queue of pending nodes
+    pub outer_pending_queue_size: usize,
+    /// The proofs processed per unit of time
+    pub proof_throughput: f64,
+    /// Queue of produced recursive proofs
+    pub recursive_proofs: VecDeque<(BatchIds::Item, Node)>,
+}
+
+impl<BatchIds: Iterator, AggregatorIds: Iterator, Node> TcpStreamAggregator<BatchIds, AggregatorIds, Node>
+where
+    BatchIds::Item: Send + Hash + Eq + Copy + 'static + BorshSerialize + BorshDeserialize,
+    AggregatorIds::Item: Send + Hash + Eq + Copy + 'static,
+    Node: Send + 'static + BorshSerialize + BorshDeserialize,
+{
+    /// Connect to the aggregator server at the given address
+    pub fn new<A: ToSocketAddrs>(free_batch_ids: BatchIds, free_aggregator_ids: AggregatorIds, addr: &A) -> Self {
+        // Cnnect to the aggregator server
+        let stream = TcpStream::connect(addr).expect("Failed to connect to Aggregator server");
+        // This client uses nonblocking operations only
+        stream.set_nonblocking(true).expect("set_nonblocking call failed");
+
+        Self {
+            stream: BufferedStream::new(stream),
+            free_batch_ids,
+            free_aggregator_ids,
+            inner_pending_queue_size: 0,
+            outer_pending_queue_size: 0,
+            proof_throughput: 1.0,
+            recursive_proofs: VecDeque::new(),
+        }
+    }
+
+    /// Send command to shutdown the server
+    pub fn shutdown(&mut self) {
+        self.stream.send(TcpRequest::<BatchIds::Item, Node>::Shutdown).unwrap();
+    }
+}
+
+// Implement the Aggregator trait for the client
+impl<BatchIds: Iterator, AggregatorIds: Iterator, Node> Aggregator for TcpStreamAggregator<BatchIds, AggregatorIds, Node>
+where
+    BatchIds::Item: Send + Hash + Eq + Copy + 'static + BorshSerialize + BorshDeserialize,
+    AggregatorIds::Item: Send + Hash + Eq + Copy + 'static,
+    Node: Send + 'static + BorshSerialize + BorshDeserialize,
+{
+    type AggregatorId = AggregatorIds::Item;
+    type BatchId = BatchIds::Item;
+    type Node = Node;
+
+    fn push_internal_proofs(&mut self, proofs: Vec<Self::Node>) -> Self::BatchId {
+        self.outer_pending_queue_size += proofs.len();
+        let batch_id = gen_id(&mut self.free_batch_ids);
+        self.stream.send(TcpRequest::PushInternalProofs(batch_id, proofs)).unwrap();
+        batch_id
+    }
+
+    fn pop_recursive_proof(&mut self) -> Option<(Self::BatchId, Self::Node)> {
+        self.recursive_proofs.pop_front()
+    }
+
+    fn pending_queue_size(&self) -> usize {
+        self.inner_pending_queue_size + self.outer_pending_queue_size
+    }
+
+    fn proof_throughput(&self) -> f64 { self.proof_throughput }
+
+    fn step(&mut self) { self.stream.send(TcpRequest::<Self::BatchId, Self::Node>::Step).unwrap(); }
+
+    fn sync(&mut self) {
+        // Update the object state with data from the inner thread
+        while let Ok(resp) = self.stream.try_recv::<TcpResponse::<Self::BatchId, Self::Node>>() {
+            match resp {
+                TcpResponse::PendingQueueSize(delta, new_size) => {
+                    self.outer_pending_queue_size = self.outer_pending_queue_size.saturating_sub(delta);
+                    self.inner_pending_queue_size = new_size;
+                }
+                TcpResponse::ProofThroughput(throughput) => { self.proof_throughput = throughput; }
+                TcpResponse::RecursiveProof(batch_id, node) => { self.recursive_proofs.push_back((batch_id, node)); }
+            }
+        }
+        // Command the inner aggregator to synchronize
+        self.stream.send(TcpRequest::<Self::BatchId, Self::Node>::Sync).unwrap();
+    }
+
+    fn insert_sub_aggregator(&mut self, _sub_aggregator: AggregatorBox<Self>) -> Self::AggregatorId {
+        unimplemented!("TcpStreamAggregator does not support sub-aggregators.");
+    }
+    fn remove_sub_aggregator(&mut self, _id: &Self::AggregatorId) {
+        unimplemented!("TcpStreamAggregator does not support sub-aggregators.");
+    }
+}
+
+/// A TCP endpoint that forwards requests to an aggregator
+pub struct TcpAggregatorServer<A: Aggregator> {
+    /// The aggregator to which requests are forwarded
+    pub aggregator: A,
+    /// The TCP socket server that listens for requests
+    pub listener: TcpListener,
+}
+
+impl<A: Aggregator> TcpAggregatorServer<A>
+where
+    A::BatchId: BorshSerialize + BorshDeserialize + Eq + Hash + Copy + Debug,
+    A::Node: BorshSerialize + BorshDeserialize + Debug,
+{
+    /// Create an aggregator server that listens for requests at the given address
+    /// and forwards them to the given aggregator
+    pub fn new<B: ToSocketAddrs>(addr: &B, aggregator: A) -> Self {
+        let listener = TcpListener::bind(addr).expect("Failed to bind to port");
+        Self { aggregator, listener }
+    }
+
+    pub fn run(&mut self) {
+        println!("Server listening on {:?}", self.listener.local_addr().unwrap());
+        // Accept a new connection from the listener
+        let (stream, peer_addr) = self.listener.accept().expect("couldn't get client");
+        println!("Client connected from {:?}", peer_addr);
+        // Wrap the stream so that received objects are automatically deserialized
+        let mut stream = BufferedStream::new(stream);
+        let mut batch_aliases = HashMap::new();
+        // Process commands until the client disconnects or sends Shutdown
+        while let Ok(req) = stream.try_recv::<TcpRequest<A::BatchId, A::Node>>() {
+            // Number of internal proofs pushed during this iteration
+            let mut internal_proofs_pushed = 0;
+            // Forward the command to the inner aggregator
+            match req {
+                TcpRequest::PushInternalProofs(outer_id, proofs) => {
+                    internal_proofs_pushed += proofs.len();
+                    let inner_id = self.aggregator.push_internal_proofs(proofs);
+                    batch_aliases.insert(inner_id, outer_id); // Map server ID to client ID
+                }
+                TcpRequest::Step => self.aggregator.step(),
+                TcpRequest::Sync => self.aggregator.sync(),
+                TcpRequest::Shutdown => break,
+            }
+
+            // Push generated proofs back to the client
+            while let Some((inner_id, node)) = self.aggregator.pop_recursive_proof() {
+                let outer_id = batch_aliases.remove(&inner_id).expect("Unknown inner ID on server");
+                stream.send(&TcpResponse::RecursiveProof(outer_id, node)).expect("Unable to send back recursive proof");
+            }
+
+            // Keep client updated on load balancing metrics
+            stream.send(&TcpResponse::<A::BatchId, A::Node>::ProofThroughput(self.aggregator.proof_throughput()))
+                .expect("Unable to send back proof throughput");
+            stream.send(&TcpResponse::<A::BatchId, A::Node>::PendingQueueSize(
+                internal_proofs_pushed,
+                self.aggregator.pending_queue_size()
+            )).expect("Unable to send back pending queue size");
+        }
+        println!("Client disconnected.");
+    }
+}
+
 /// Initialize the structured reference string
 fn init_srs() {
     // Use the FFI backend which links directly to static libraries
@@ -1269,6 +1599,45 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5))]
+        #[test]
+        fn test_tcp_stream_aggregator(batch: [[u8; 32]; 256]) {
+            type MerkleAggregatorT = MerkleAggregator<RangeFrom<usize>, RangeFrom<usize>>;
+            type TcpStreamAggregatorT = TcpStreamAggregator<RangeFrom<usize>, RangeFrom<usize>, [u8; 32]>;
+            // Create a channel to synchronize the threads and pass the bound address.
+            let (tx, rx) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                // Make a simple aggregator that directly computes the root
+                let merkle_aggregator = MerkleAggregatorT::new(0usize..);
+                // Build and run a TCP aggregator server using the Merkle aggregator
+                let mut tcp_aggregator = TcpAggregatorServer::new(&"0.0.0.0:0", merkle_aggregator);
+                // Retrieve the actual address/port the OS assigned.
+                let addr = tcp_aggregator.listener.local_addr().expect("Failed to get local address");
+                // Signal to the main thread that the listener is ready, sending the port.
+                tx.send(addr).expect("Failed to send address to main thread");
+                tcp_aggregator.run();
+            });
+            // Wait for the server thread to bind and tell us its address.
+            // This entirely prevents the "Connection Refused" race condition.
+            let server_addr = rx.recv().expect("Server thread panicked or dropped the sender");
+            // Make an aggregator that forwards requests to the given IP address
+            let mut tcp_aggregator: TcpStreamAggregatorT = TcpStreamAggregator::new(0usize.., 0usize.., &server_addr);
+            // Push the random batch onto the aggregator
+            tcp_aggregator.push_internal_proofs(batch.to_vec());
+            // Make the aggregator process the proofs in the queue
+            while let None = tcp_aggregator.pop_recursive_proof() {
+                tcp_aggregator.step();
+                thread::sleep(Duration::from_secs(1));
+                tcp_aggregator.sync();
+            }
+            // Finally send message for the server to shutdown
+            tcp_aggregator.shutdown();
+            // Wait for the server thread to shutdown
+            handle.join().expect("unable to join server thread");
+            // Finally destroy the TCP aggregator
+            std::mem::drop(tcp_aggregator);
+        }
+        
         #[test]
         fn test_balanced_merkle_aggregator(batch: [[u8; 32]; 256]) {
             type MerkleAggregatorT = MerkleAggregator<RangeFrom<usize>, RangeFrom<usize>>;

@@ -14,3 +14,5 @@ bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", rev = "
 acir = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac59af0a86b036cf73ff5883d142a91" }
 noirc_abi = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac59af0a86b036cf73ff5883d142a91" }
 flate2 = "1.0.24"
+borsh = { version = "1.8.0", features = ["derive"] }
+borsh-derive = { version = "1.8.0" }
