@@ -1349,8 +1349,8 @@ where
         self.outer_pending_queue_size += proofs.len();
         let batch_id = gen_id(&mut self.free_batch_ids);
         self.stream
-            .send(TcpRequest::PushInternalProofs(batch_id, proofs))
-            .unwrap();
+            .send(TcpRequest::PushInternalProofs(batch_id, proofs));
+//            .unwrap();
         batch_id
     }
 
@@ -1368,8 +1368,8 @@ where
 
     fn step(&mut self) {
         self.stream
-            .send(TcpRequest::<Self::BatchId, Self::Node>::Step)
-            .unwrap();
+            .send(TcpRequest::<Self::BatchId, Self::Node>::Step);
+//            .unwrap();
     }
 
     fn sync(&mut self) {
@@ -1394,8 +1394,8 @@ where
         }
         // Command the inner aggregator to synchronize
         self.stream
-            .send(TcpRequest::<Self::BatchId, Self::Node>::Sync)
-            .unwrap();
+            .send(TcpRequest::<Self::BatchId, Self::Node>::Sync);
+//            .unwrap();
     }
 
     fn insert_sub_aggregator(
@@ -1491,7 +1491,7 @@ fn init_srs() {
     let backend = FfiBackend::new().unwrap();
     // Initialize the Barretenberg API
     let mut api = BarretenbergApi::new(backend);
-    const NUM_POINTS: u32 = 1 << 24;
+    const NUM_POINTS: u32 = 1 << 21;
     // CRS parameters are stored relative to home directory
     let home_dir = std::env::home_dir().expect("unable to get home directory");
     // Sub-directory of the home directory containing the CRS parameters
@@ -1658,10 +1658,10 @@ mod tests {
 
     #[test]
     pub fn bench_mixed_threaded_barretenberg_aggregator() {
-        const BATCH_SIZE: usize = 8;
-        const NUM_AGGREGATORS: usize = 4;
-        const BATCH_COUNT: usize = 4;
-        const SUB_AGGREGATORS: [&str; 1] = ["127.0.0.1:8001"];
+        const BATCH_SIZE: usize = 32;
+        const NUM_AGGREGATORS: usize = 63;
+        const BATCH_COUNT: usize = 192;
+        const SUB_AGGREGATORS: [&str; 3] = ["172.31.39.184:8001", "172.31.38.143:8001", "172.31.32.148:8001"];
         // Initialize the structured reference string
         init_srs();
         let batch: [VerifierInputs; BATCH_SIZE] = std::array::repeat(noir_recursive_no_zk_proof());
