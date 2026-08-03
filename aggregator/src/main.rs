@@ -1348,9 +1348,13 @@ where
     fn push_internal_proofs(&mut self, proofs: Vec<Self::Node>) -> Self::BatchId {
         self.outer_pending_queue_size += proofs.len();
         let batch_id = gen_id(&mut self.free_batch_ids);
-        self.stream
+        if let Err(e) = self
+            .stream
             .send(TcpRequest::PushInternalProofs(batch_id, proofs))
-            .unwrap();
+            && e.kind() != std::io::ErrorKind::WouldBlock
+        {
+            panic!("TcpStreamAggregator::push_internal_proofs error: {}", e);
+        }
         batch_id
     }
 
@@ -1367,9 +1371,13 @@ where
     }
 
     fn step(&mut self) {
-        self.stream
+        if let Err(e) = self
+            .stream
             .send(TcpRequest::<Self::BatchId, Self::Node>::Step)
-            .unwrap();
+            && e.kind() != std::io::ErrorKind::WouldBlock
+        {
+            panic!("TcpStreamAggregator::step error: {}", e);
+        }
     }
 
     fn sync(&mut self) {
@@ -1393,9 +1401,13 @@ where
             }
         }
         // Command the inner aggregator to synchronize
-        self.stream
+        if let Err(e) = self
+            .stream
             .send(TcpRequest::<Self::BatchId, Self::Node>::Sync)
-            .unwrap();
+            && e.kind() != std::io::ErrorKind::WouldBlock
+        {
+            panic!("TcpStreamAggregator::sync error: {}", e);
+        }
     }
 
     fn insert_sub_aggregator(
