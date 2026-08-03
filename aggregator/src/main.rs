@@ -1152,8 +1152,8 @@ impl BufferedStream {
         if output_buf_len <= read_buf_len {
             // If read buffer contains enough bytes to saturate parameter
             // Then move the read buffer's prefix into the parameter
-            buf.copy_from_slice(&self.read_buf[..buf.len()]);
-            self.read_buf.drain(..buf.len());
+            buf.copy_from_slice(&self.read_buf[..output_buf_len]);
+            self.read_buf.drain(..output_buf_len);
             Ok(())
         } else {
             // If read buffer contains insufficient bytes to saturate parameter
@@ -1161,15 +1161,16 @@ impl BufferedStream {
             let mut bytes_read = self.stream.read(&mut buf[read_buf_len..])?;
             // New total number of bytes buffered
             bytes_read += read_buf_len;
-            if bytes_read == 0 {
+            if bytes_read == read_buf_len {
                 Err(std::io::ErrorKind::WouldBlock.into())
             } else if bytes_read < output_buf_len {
                 // Copy bytes from the output buffer into the read buffer
                 self.read_buf
                     .extend_from_slice(&buf[read_buf_len..bytes_read]);
                 // Try to read more bytes
-                self.read_exact(&mut buf[bytes_read..])
+                self.read_exact(buf)
             } else {
+                assert_eq!(bytes_read, output_buf_len);
                 // Move bytes from the read buffer into the output buffer
                 buf[..read_buf_len].copy_from_slice(&self.read_buf[..]);
                 self.read_buf.clear();
@@ -1240,7 +1241,7 @@ impl BufferedStream {
 
     /// Send the given object into the stream in a way such that it can be
     /// received with try_recv.
-    pub fn send<T: BorshSerialize>(&mut self, t: T) -> std::io::Result<()> {
+    pub fn send<T: BorshSerialize + Debug>(&mut self, t: T) -> std::io::Result<()> {
         // Convert the given object into bytes and then prepend a length
         // prefix. Write with write_all to ensure that bytes are not lost.
         self.write_all(&borsh::to_vec(&borsh::to_vec(&t)?)?)
@@ -1296,9 +1297,9 @@ where
 impl<BatchIds: Iterator, AggregatorIds: Iterator, Node>
     TcpStreamAggregator<BatchIds, AggregatorIds, Node>
 where
-    BatchIds::Item: Send + Hash + Eq + Copy + 'static + BorshSerialize + BorshDeserialize,
+    BatchIds::Item: Send + Hash + Eq + Copy + 'static + BorshSerialize + BorshDeserialize + Debug,
     AggregatorIds::Item: Send + Hash + Eq + Copy + 'static,
-    Node: Send + 'static + BorshSerialize + BorshDeserialize,
+    Node: Send + 'static + BorshSerialize + BorshDeserialize + Debug,
 {
     /// Connect to the aggregator server at the given address
     pub fn new<A: ToSocketAddrs>(
@@ -1336,9 +1337,9 @@ where
 impl<BatchIds: Iterator, AggregatorIds: Iterator, Node> Aggregator
     for TcpStreamAggregator<BatchIds, AggregatorIds, Node>
 where
-    BatchIds::Item: Send + Hash + Eq + Copy + 'static + BorshSerialize + BorshDeserialize,
+    BatchIds::Item: Send + Hash + Eq + Copy + 'static + BorshSerialize + BorshDeserialize + Debug,
     AggregatorIds::Item: Send + Hash + Eq + Copy + 'static,
-    Node: Send + 'static + BorshSerialize + BorshDeserialize,
+    Node: Send + 'static + BorshSerialize + BorshDeserialize + Debug,
 {
     type AggregatorId = AggregatorIds::Item;
     type BatchId = BatchIds::Item;
@@ -1639,6 +1640,50 @@ mod tests {
                 0..,
                 0..,
                 || BarretenbergAggregatorT::new(0usize..),
+            )));
+        }
+        // Push some work onto the recursive aggregator
+        for _i in 0..BATCH_COUNT {
+            recursive_aggregator.push_internal_proofs(batch.to_vec());
+        }
+        // Repeatedly step through distribution and consolidation
+        for _i in 0..BATCH_COUNT {
+            while let None = recursive_aggregator.pop_recursive_proof() {
+                recursive_aggregator.step();
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        assert_eq!(recursive_aggregator.pop_recursive_proof(), None);
+    }
+
+    #[test]
+    pub fn bench_mixed_threaded_barretenberg_aggregator() {
+        const BATCH_SIZE: usize = 8;
+        const NUM_AGGREGATORS: usize = 4;
+        const BATCH_COUNT: usize = 4;
+        const SUB_AGGREGATORS: [&str; 1] = ["127.0.0.1:8001"];
+        // Initialize the structured reference string
+        init_srs();
+        let batch: [VerifierInputs; BATCH_SIZE] = std::array::repeat(noir_recursive_no_zk_proof());
+        type BarretenbergAggregatorT = BarretenbergAggregator<RangeFrom<usize>, RangeFrom<usize>>;
+        type RecursiveAggregatorT =
+            RecursiveAggregator<VerifierInputs, RangeFrom<usize>, RangeFrom<usize>>;
+        // Make a more complex aggregator
+        let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
+        // Push NUM_AGGREGATORS sub-aggregators to actually handle the computations
+        for _i in 0..NUM_AGGREGATORS {
+            recursive_aggregator.insert_sub_aggregator(Box::new(ThreadedAggregator::new(
+                0..,
+                0..,
+                || BarretenbergAggregatorT::new(0usize..),
+            )));
+        }
+        // Also push some TCP sub-aggregators onto the aggregator
+        for addr in SUB_AGGREGATORS {
+            recursive_aggregator.insert_sub_aggregator(Box::new(TcpStreamAggregator::new(
+                0usize..,
+                0usize..,
+                &addr,
             )));
         }
         // Push some work onto the recursive aggregator
