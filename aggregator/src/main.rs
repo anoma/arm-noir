@@ -1503,7 +1503,7 @@ fn init_srs() {
     let backend = FfiBackend::new().unwrap();
     // Initialize the Barretenberg API
     let mut api = BarretenbergApi::new(backend);
-    const NUM_POINTS: u32 = 1 << 24;
+    const NUM_POINTS: u32 = 1 << 21;
     // CRS parameters are stored relative to home directory
     let home_dir = std::env::home_dir().expect("unable to get home directory");
     // Sub-directory of the home directory containing the CRS parameters
@@ -1670,10 +1670,10 @@ mod tests {
 
     #[test]
     pub fn bench_mixed_threaded_barretenberg_aggregator() {
-        const BATCH_SIZE: usize = 8;
-        const NUM_AGGREGATORS: usize = 4;
-        const BATCH_COUNT: usize = 4;
-        const SUB_AGGREGATORS: [&str; 1] = ["127.0.0.1:8001"];
+        const BATCH_SIZE: usize = 32;
+        const NUM_AGGREGATORS: usize = 63;
+        const BATCH_COUNT: usize = 128;
+        const SUB_AGGREGATORS: [&str; 3] = ["172.31.47.136:8001", "172.31.38.81:8001", "172.31.32.149:8001"];
         // Initialize the structured reference string
         init_srs();
         let batch: [VerifierInputs; BATCH_SIZE] = std::array::repeat(noir_recursive_no_zk_proof());
