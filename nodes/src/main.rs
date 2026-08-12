@@ -7,25 +7,14 @@ use crate::aggregator::VerifierInputs;
 use crate::aggregator::ThreadedAggregator;
 use crate::aggregator::TcpAggregatorServer;
 use crate::aggregator::Aggregator;
+use std::net::ToSocketAddrs;
 use nodes::init_srs;
 
 /// Run a Barretenberg proof aggregator server with several threads
-fn main() {
+fn aggregator_server<B: ToSocketAddrs>(address: &B, thread_count: usize) {
     type BarretenbergAggregatorT = BarretenbergAggregator<RangeFrom<usize>, RangeFrom<usize>>;
     type RecursiveAggregatorT =
         RecursiveAggregator<VerifierInputs, RangeFrom<usize>, RangeFrom<usize>>;
-    // Initialize the structured reference string
-    init_srs();
-    // Grab the command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: aggregator <ADDRESS> <THREAD COUNT>");
-        std::process::exit(1);
-    }
-    // The address at which the aggregator server will run
-    let address = &args[1];
-    // The number of aggregator threads to run
-    let thread_count: usize = args[2].parse().expect("thread count should be a number");
     // Make a more complex aggregator
     let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
     // Push thread_count sub-aggregators to actually handle the computations
@@ -42,6 +31,36 @@ fn main() {
     loop {
         if let Err(err) = tcp_aggregator.run() {
             println!("Encountered error in client connection: {:?}", err);
+        }
+    }
+}
+
+/// Run the aggregator
+fn main() {
+    // Initialize the structured reference string
+    init_srs();
+    // Grab the command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: nodes <SUBCOMMAND> ...");
+        std::process::exit(1);
+    }
+    match args[1].as_str() {
+        "aggregator" => {
+            if args.len() != 4 {
+                eprintln!("Usage: nodes aggregator <ADDRESS> <THREAD COUNT>");
+                std::process::exit(1);
+            }
+            // The address at which the aggregator server will run
+            let address = &args[2];
+            // The number of aggregator threads to run
+            let thread_count = args[3].parse().expect("thread count should be a number");
+            // Finally, start the aggregator server
+            aggregator_server(address, thread_count);
+        },
+        _ => {
+            eprintln!("Unknown subcommand, must be: aggregator");
+            std::process::exit(1);
         }
     }
 }
