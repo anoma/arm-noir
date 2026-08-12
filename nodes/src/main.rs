@@ -9,6 +9,7 @@ use crate::aggregator::TcpAggregatorServer;
 use crate::aggregator::Aggregator;
 use std::net::ToSocketAddrs;
 use nodes::init_srs;
+use clap::{Parser, Args};
 
 /// Run a Barretenberg proof aggregator server with several threads
 fn aggregator_server<B: ToSocketAddrs>(address: &B, thread_count: usize) {
@@ -35,32 +36,32 @@ fn aggregator_server<B: ToSocketAddrs>(address: &B, thread_count: usize) {
     }
 }
 
+/// CLI interface for the UltraHonk based Anoma Resource Machine
+#[derive(Parser)]
+#[command(name = "nodes", version, about, long_about = None)]
+enum Cli {
+    /// Run the proof aggregator
+    Aggregator(AggregatorArgs),
+}
+
+#[derive(Args)]
+struct AggregatorArgs {
+    /// The address at which the aggregator server will run
+    address: String,
+    /// Number of aggregator threads to run
+    thread_count: usize,
+}
+
 /// Run the aggregator
 fn main() {
+    let cli = Cli::parse();
     // Initialize the structured reference string
     init_srs();
-    // Grab the command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: nodes <SUBCOMMAND> ...");
-        std::process::exit(1);
-    }
-    match args[1].as_str() {
-        "aggregator" => {
-            if args.len() != 4 {
-                eprintln!("Usage: nodes aggregator <ADDRESS> <THREAD COUNT>");
-                std::process::exit(1);
-            }
-            // The address at which the aggregator server will run
-            let address = &args[2];
-            // The number of aggregator threads to run
-            let thread_count = args[3].parse().expect("thread count should be a number");
+    // Process CLI arguments
+    match cli {
+        Cli::Aggregator(args) => {
             // Finally, start the aggregator server
-            aggregator_server(address, thread_count);
+            aggregator_server(&args.address, args.thread_count);
         },
-        _ => {
-            eprintln!("Unknown subcommand, must be: aggregator");
-            std::process::exit(1);
-        }
     }
 }

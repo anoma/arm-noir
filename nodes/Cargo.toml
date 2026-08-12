@@ -16,3 +16,4 @@ noirc_abi = { git = "https://github.com/noir-lang/noir.git", rev = "f1a4575adac5
 flate2 = "1.0.24"
 borsh = { version = "1.8.0", features = ["derive"] }
 borsh-derive = { version = "1.8.0" }
+clap = { version = "4.6.6", features = ["derive"] }
