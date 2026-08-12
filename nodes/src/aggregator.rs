@@ -31,17 +31,10 @@ use std::marker::PhantomData;
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
-use std::ops::RangeFrom;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
-/// The directory containing the common reference string
-const CRS_DIR: &str = ".bb-crs";
-/// Name of file containing G1 point data
-const G1_UNCOMPRESSED_DATA_PATH: &str = "bn254_g1.dat";
-/// Name of file containing G2 point data
-const G2_UNCOMPRESSED_DATA_PATH: &str = "bn254_g2.dat";
 /// Path to file containing the aggregation circuit
 const AGGREGATION_CIRCUIT_PATH: &str = "../circuits/target/recursive_no_zk_aggregation.json";
 /// Wait time beyond which a sub-aggregator should not be loaded
@@ -1497,74 +1490,17 @@ where
     }
 }
 
-/// Initialize the structured reference string
-fn init_srs() {
-    // Use the FFI backend which links directly to static libraries
-    let backend = FfiBackend::new().unwrap();
-    // Initialize the Barretenberg API
-    let mut api = BarretenbergApi::new(backend);
-    const NUM_POINTS: u32 = 1 << 24;
-    // CRS parameters are stored relative to home directory
-    let home_dir = std::env::home_dir().expect("unable to get home directory");
-    // Sub-directory of the home directory containing the CRS parameters
-    let crs_path = home_dir.join(CRS_DIR);
-    // Read G1 point data
-    let g1_data =
-        std::fs::read(crs_path.join(G1_UNCOMPRESSED_DATA_PATH)).expect("unable to read G1 data");
-    // Read G2 point data
-    let g2_data =
-        std::fs::read(crs_path.join(G2_UNCOMPRESSED_DATA_PATH)).expect("unable to read G2 data");
-    // Initialize the global CRS
-    let init_srs_response = api
-        .srs_init_srs(&g1_data, NUM_POINTS, &g2_data)
-        .expect("unable to initialize the global CRS");
-    println!("Initialize SRS response: {:?}", init_srs_response);
-    // Finally destroy the backend
-    api.shutdown().unwrap();
-}
-
-/// Run a Barretenberg proof aggregator server with several threads
-fn main() {
-    type BarretenbergAggregatorT = BarretenbergAggregator<RangeFrom<usize>, RangeFrom<usize>>;
-    type RecursiveAggregatorT =
-        RecursiveAggregator<VerifierInputs, RangeFrom<usize>, RangeFrom<usize>>;
-    // Initialize the structured reference string
-    init_srs();
-    // Grab the command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: aggregator <ADDRESS> <THREAD COUNT>");
-        std::process::exit(1);
-    }
-    // The address at which the aggregator server will run
-    let address = &args[1];
-    // The number of aggregator threads to run
-    let thread_count: usize = args[2].parse().expect("thread count should be a number");
-    // Make a more complex aggregator
-    let mut recursive_aggregator = RecursiveAggregatorT::new(0usize.., 0usize..);
-    // Push thread_count sub-aggregators to actually handle the computations
-    for _i in 0..thread_count {
-        recursive_aggregator.insert_sub_aggregator(Box::new(ThreadedAggregator::new(
-            0..,
-            0..,
-            || BarretenbergAggregatorT::new(0usize..),
-        )));
-    }
-    // Build TCP aggregator server using the recursive aggregator
-    let mut tcp_aggregator = TcpAggregatorServer::new(&address, recursive_aggregator);
-    // Repeatedly accept new connections
-    loop {
-        if let Err(err) = tcp_aggregator.run() {
-            println!("Encountered error in client connection: {:?}", err);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::time::Duration;
+    use crate::aggregator::TcpStreamAggregator;
+    use crate::aggregator::MerkleAggregator;
+    use std::thread;
+    use std::sync::mpsc;
+    use std::ops::RangeFrom;
+    use nodes::init_srs;
 
     // A ZK proof to use for testing
     fn noir_recursive_no_zk_proof() -> VerifierInputs {

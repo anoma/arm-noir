@@ -95,24 +95,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aggregator"
-version = "0.1.0"
-dependencies = [
- "acir",
- "barretenberg-rs",
- "bn254_blackbox_solver",
- "borsh",
- "borsh-derive",
- "flate2",
- "nargo",
- "noir_artifact_cli",
- "noirc_abi",
- "noirc_artifacts",
- "proptest",
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2000,6 +1982,24 @@ dependencies = [
  "cfg-if",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nodes"
+version = "0.1.0"
+dependencies = [
+ "acir",
+ "barretenberg-rs",
+ "bn254_blackbox_solver",
+ "borsh",
+ "borsh-derive",
+ "flate2",
+ "nargo",
+ "noir_artifact_cli",
+ "noirc_abi",
+ "noirc_artifacts",
+ "proptest",
+ "sha2 0.11.0",
 ]
 
 [[package]]
