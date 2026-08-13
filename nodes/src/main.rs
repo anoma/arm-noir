@@ -14,10 +14,6 @@ use noirc_abi::InputMap;
 use noirc_abi::input_parser::InputValue;
 use acir::FieldElement;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use barretenberg_rs::backends::FfiBackend;
-use barretenberg_rs::BarretenbergApi;
-use nodes::BarretenbergCircuit;
 
 /// Path to file containing the aggregation circuit
 const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -70,31 +66,33 @@ fn aggregator_server<B: ToSocketAddrs>(address: &B, thread_count: usize) {
     }
 }
 
-fn bytes_to_input_value(bytes: &[u8]) -> InputValue {
-    InputValue::Vec(
-        bytes
-            .into_iter()
-            .map(|x| InputValue::Field(FieldElement::from(*x)))
-            .collect(),
-    )
-}
-
-fn array_to_input_value<const N: usize>(bytes: &[u8; N]) -> InputValue {
-    InputValue::Vec(
-        bytes
-            .into_iter()
-            .map(|x| InputValue::Field(FieldElement::from(*x)))
-            .collect(),
-    )
-}
-
-fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T> {
+/// Construct input value from Option type
+fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T>, T: Default {
     let mut map = InputMap::new();
     map.insert("_is_some".to_string(), InputValue::Field(FieldElement::from(opt.is_some())));
-    if let Some(val) = opt {
-        map.insert("_value".to_string(), val.into());
-    }
+    map.insert("_value".to_string(), opt.unwrap_or_default().into());
     InputValue::Struct(map)
+}
+
+/// Array type wrapper that eases construction of InputValues
+struct Array<const N: usize>([u8; N]);
+
+impl<const N: usize> From<Array<N>> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: Array<N>) -> Self {
+        InputValue::Vec(
+            res.0
+                .into_iter()
+                .map(|x| InputValue::Field(FieldElement::from(x)))
+                .collect(),
+        )
+    }
+}
+
+impl<const N: usize> Default for Array<N> {
+    fn default() -> Self {
+        Self([0; _])
+    }
 }
 
 /// ARM Resource
@@ -122,12 +120,12 @@ impl From<Resource> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: Resource) -> Self {
         let mut map = InputMap::new();
-        map.insert("logic_ref".to_string(), bytes_to_input_value(&res.logic_ref));
-        map.insert("label_ref".to_string(), bytes_to_input_value(&res.label_ref));
-        map.insert("value_ref".to_string(), bytes_to_input_value(&res.value_ref));
-        map.insert("nonce".to_string(), bytes_to_input_value(&res.nonce));
-        map.insert("nk_commitment".to_string(), bytes_to_input_value(&res.nk_commitment));
-        map.insert("rand_seed".to_string(), bytes_to_input_value(&res.rand_seed));
+        map.insert("logic_ref".to_string(), Array(res.logic_ref).into());
+        map.insert("label_ref".to_string(), Array(res.label_ref).into());
+        map.insert("value_ref".to_string(), Array(res.value_ref).into());
+        map.insert("nonce".to_string(), Array(res.nonce).into());
+        map.insert("nk_commitment".to_string(), Array(res.nk_commitment).into());
+        map.insert("rand_seed".to_string(), Array(res.rand_seed).into());
         map.insert("is_ephemeral".to_string(), InputValue::Field(FieldElement::from(res.is_ephemeral)));
         map.insert("quantity".to_string(), InputValue::Field(FieldElement::from(res.quantity)));
         InputValue::Struct(map)
@@ -135,6 +133,7 @@ impl From<Resource> for InputValue {
 }
 
 /// Nullifier key
+#[derive(Default)]
 pub struct NullifierKey {
     pub bytes: [u8; DIGEST_BYTES],
 }
@@ -143,7 +142,7 @@ impl From<NullifierKey> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: NullifierKey) -> Self {
         let mut map = InputMap::new();
-        map.insert("bytes".to_string(), bytes_to_input_value(&res.bytes));
+        map.insert("bytes".to_string(), Array(res.bytes).into());
         InputValue::Struct(map)
     }
 }
@@ -156,17 +155,27 @@ pub struct ValueInfo {
     encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
 }
 
+impl Default for ValueInfo {
+    fn default() -> Self {
+        Self {
+            auth_pk: [0; _],
+            encryption_pk: [0; _],
+        }
+    }
+}
+
 impl From<ValueInfo> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: ValueInfo) -> Self {
         let mut map = InputMap::new();
-        map.insert("auth_pk".to_string(), bytes_to_input_value(&res.auth_pk));
-        map.insert("encryption_pk".to_string(), bytes_to_input_value(&res.encryption_pk));
+        map.insert("auth_pk".to_string(), Array(res.auth_pk).into());
+        map.insert("encryption_pk".to_string(), Array(res.encryption_pk).into());
         InputValue::Struct(map)
     }
 }
 
 /// LabelInfo holds information about label plaintext.
+#[derive(Default)]
 struct LabelInfo {
     /// Address of the forwarder contract for this resource.
     forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
@@ -178,8 +187,8 @@ impl From<LabelInfo> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: LabelInfo) -> Self {
         let mut map = InputMap::new();
-        map.insert("forwarder_addr".to_string(), bytes_to_input_value(&res.forwarder_addr));
-        map.insert("erc20_token_addr".to_string(), bytes_to_input_value(&res.erc20_token_addr));
+        map.insert("forwarder_addr".to_string(), Array(res.forwarder_addr).into());
+        map.insert("erc20_token_addr".to_string(), Array(res.erc20_token_addr).into());
         InputValue::Struct(map)
     }
 }
@@ -195,18 +204,29 @@ struct PermitInfo {
     permit_sig: [u8; MAX_PERMIT_SIG_LEN],
 }
 
+impl Default for PermitInfo {
+    fn default() -> Self {
+        Self {
+            permit_nonce: [0; _],
+            permit_deadline: [0; _],
+            permit_sig: [0; _],
+        }
+    }
+}
+
 impl From<PermitInfo> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: PermitInfo) -> Self {
         let mut map = InputMap::new();
-        map.insert("permit_nonce".to_string(), bytes_to_input_value(&res.permit_nonce));
-        map.insert("permit_deadline".to_string(), bytes_to_input_value(&res.permit_deadline));
-        map.insert("permit_sig".to_string(), bytes_to_input_value(&res.permit_sig));
+        map.insert("permit_nonce".to_string(), Array(res.permit_nonce).into());
+        map.insert("permit_deadline".to_string(), Array(res.permit_deadline).into());
+        map.insert("permit_sig".to_string(), Array(res.permit_sig).into());
         InputValue::Struct(map)
     }
 }
 
 /// ForwarderInfo holds information about the forwarder contract being used by a transaction.
+#[derive(Default)]
 struct ForwarderInfo {
     /// Wrapping/Unwrapping of a resource (i.e., mint/burn).
     call_type: u8,
@@ -220,7 +240,7 @@ impl From<ForwarderInfo> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: ForwarderInfo) -> Self {
         let mut map = InputMap::new();
-        map.insert("ethereum_account_addr".to_string(), bytes_to_input_value(&res.ethereum_account_addr));
+        map.insert("ethereum_account_addr".to_string(), Array(res.ethereum_account_addr).into());
         map.insert("call_type".to_string(), InputValue::Field(FieldElement::from(res.call_type)));
         map.insert("permit".to_string(), option_to_input_value(res.permit));
         InputValue::Struct(map)
@@ -262,10 +282,10 @@ impl From<TransferAuthWitness> for InputValue {
         map.insert("is_consumed".to_string(), InputValue::Field(FieldElement::from(res.is_consumed)));
         map.insert("resource_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.resource_ciphertext_len)));
         map.insert("discovery_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.discovery_ciphertext_len)));
-        map.insert("action_root".to_string(), bytes_to_input_value(&res.action_root));
-        map.insert("auth_sig".to_string(), option_to_input_value(res.auth_sig.as_ref().map(array_to_input_value)));
-        map.insert("resource_ciphertext".to_string(), option_to_input_value(res.resource_ciphertext.as_ref().map(array_to_input_value)));
-        map.insert("discovery_ciphertext".to_string(), option_to_input_value(res.discovery_ciphertext.as_ref().map(array_to_input_value)));
+        map.insert("action_root".to_string(), Array(res.action_root).into());
+        map.insert("auth_sig".to_string(), option_to_input_value(res.auth_sig.map(Array)));
+        map.insert("resource_ciphertext".to_string(), option_to_input_value(res.resource_ciphertext.map(Array)));
+        map.insert("discovery_ciphertext".to_string(), option_to_input_value(res.discovery_ciphertext.map(Array)));
         map.insert("nullifier_key".to_string(), option_to_input_value(res.nullifier_key));
         map.insert("value_info".to_string(), option_to_input_value(res.value_info));
         map.insert("label_info".to_string(), option_to_input_value(res.label_info));
@@ -304,70 +324,88 @@ fn main() {
             aggregator_server(&args.address, args.thread_count);
         },
         Cli::Client => {
-            let transfer_auth = TransferAuthWitness {
-                action_root: [0; DIGEST_BYTES],
-                is_consumed: true,
-                nullifier_key: Some(NullifierKey {
-                    bytes: [0; DIGEST_BYTES],
-                }),
-                value_info: Some(ValueInfo {
-                    auth_pk: [0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8],
-                    encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
-                }),
-                auth_sig: Some([
-                    0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
-                    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
-                    0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
-                    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
-                ]),
-                resource_ciphertext: Some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
-                resource_ciphertext_len: 0,
-                discovery_ciphertext: Some([0; MAX_DISCOVERY_CIPHERTEXT_LEN]),
-                discovery_ciphertext_len: 0,
-                forwarder_info: Some(ForwarderInfo {
-                    call_type: 0,
-                    ethereum_account_addr: [0; MAX_ETH_ADDR_LEN],
-                    permit: Some(PermitInfo {
-                        permit_nonce: [0; MAX_PERMIT_NONCE_LEN],
-                        permit_deadline: [0; MAX_PERMIT_DEADLINE_LEN],
-                        permit_sig: [0; MAX_PERMIT_SIG_LEN],
-                    }),
-                }),
-                label_info: Some(LabelInfo {
-                    forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
-                    erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
-                }),
-                resource: Resource {
-                    logic_ref: [0; DIGEST_BYTES],
-                    label_ref: [0; DIGEST_BYTES],
-                    value_ref: [
-                        251, 115, 230, 34, 134, 135, 66, 60, 171, 246, 65, 210, 213, 104, 205, 204,
-                        207, 125, 253, 189, 44, 24, 199, 126, 89, 234, 46, 24, 182, 164, 120, 101,
-                    ],
-                    quantity: 0,
-                    nonce: [0; DIGEST_BYTES],
-                    nk_commitment: [
-                        41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
-                        75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99,
-                    ],
-                    is_ephemeral: false,
-                    rand_seed: [0; DIGEST_BYTES],
-                },
-            };
-            let mut input_map = InputMap::new();
-            input_map.insert("witness".to_string(), transfer_auth.into());
-            // Load up the aggregation circuit from disk
-            let program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
-            // Use the FFI backend which links directly to static libraries
-            let backend = FfiBackend::new().unwrap();
-            // Initialize the Barretenberg API
-            let mut api = BarretenbergApi::new(backend);
-            // Load up the aggregation circuit from disk
-            let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
-            // Compute the proof from the witness bytes
-            let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-            let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
-            println!("Verification response: {:?}", verify_response);
+            // Client implementation...
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use barretenberg_rs::backends::FfiBackend;
+    use barretenberg_rs::BarretenbergApi;
+    use nodes::BarretenbergCircuit;
+
+    #[test]
+    fn test_transfer_auth_witness() {
+        // Initialize the structured reference string
+        init_srs();
+        // Transfer authorization witness
+        let transfer_auth = TransferAuthWitness {
+            action_root: [0; DIGEST_BYTES],
+            is_consumed: true,
+            nullifier_key: Some(NullifierKey {
+                bytes: [0; DIGEST_BYTES],
+            }),
+            value_info: Some(ValueInfo {
+                auth_pk: [0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8],
+                encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
+            }),
+            auth_sig: Some([
+                0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+                0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+                0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+                0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+            ]),
+            resource_ciphertext: Some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
+            resource_ciphertext_len: 0,
+            discovery_ciphertext: Some([0; MAX_DISCOVERY_CIPHERTEXT_LEN]),
+            discovery_ciphertext_len: 0,
+            forwarder_info: Some(ForwarderInfo {
+                call_type: 0,
+                ethereum_account_addr: [0; MAX_ETH_ADDR_LEN],
+                permit: Some(PermitInfo {
+                    permit_nonce: [0; MAX_PERMIT_NONCE_LEN],
+                    permit_deadline: [0; MAX_PERMIT_DEADLINE_LEN],
+                    permit_sig: [0; MAX_PERMIT_SIG_LEN],
+                }),
+            }),
+            label_info: Some(LabelInfo {
+                forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
+                erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
+            }),
+            resource: Resource {
+                logic_ref: [0; DIGEST_BYTES],
+                label_ref: [0; DIGEST_BYTES],
+                value_ref: [
+                    251, 115, 230, 34, 134, 135, 66, 60, 171, 246, 65, 210, 213, 104, 205, 204,
+                    207, 125, 253, 189, 44, 24, 199, 126, 89, 234, 46, 24, 182, 164, 120, 101,
+                ],
+                quantity: 0,
+                nonce: [0; DIGEST_BYTES],
+                nk_commitment: [
+                    41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
+                    75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99,
+                ],
+                is_ephemeral: false,
+                rand_seed: [0; DIGEST_BYTES],
+            },
+        };
+        // Construct inputs for proving
+        let mut input_map = InputMap::new();
+        input_map.insert("witness".to_string(), transfer_auth.into());
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+        // Use the FFI backend which links directly to static libraries
+        let backend = FfiBackend::new().unwrap();
+        // Initialize the Barretenberg API
+        let mut api = BarretenbergApi::new(backend);
+        // Load up the aggregation circuit from disk
+        let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+        // Compute the proof from the witness bytes
+        let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+        let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+        assert!(verify_response.verified);
     }
 }
