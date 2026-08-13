@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 
 /// Path to file containing the aggregation circuit
 const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
+// You may need to define this constant at the top of your file alongside TRANSFER_AUTH_CIRCUIT_PATH
+const COMPLIANCE_CIRCUIT_PATH: &str = "../circuits/target/compliance.json";
 
 const DIGEST_BYTES: usize = 32;
 // Constants for bounding unbounded loops and variable-length arrays
@@ -40,6 +42,14 @@ const MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1461;
 const CALL_TYPE_WRAP: u8 = 0;
 const CALL_TYPE_UNWRAP: u8 = 1;
 const PRF_EXPAND_PERSONALIZATION_LEN: u32 = 16;
+const MAX_CREATED: usize = 4;
+const MAX_CONSUMED: usize = 4;
+const MAX_KINDS: u32 = 8;
+const MAX_TREE_DEPTH: usize = 32; // Set this to your actual max commitment tree depth
+const CONSUMED_COUNT_BYTES: u32 = 4;
+const CREATED_COUNT_BYTES: u32 = 4;
+const BASE_FIELD_BYTES: u32 = 32;
+//const MAX_COMPLIANCE_DIGEST_BUF_LEN: u32 = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 
 /// Run a Barretenberg proof aggregator server with several threads
 fn aggregator_server<B: ToSocketAddrs>(address: &B, thread_count: usize) {
@@ -294,6 +304,176 @@ impl From<TransferAuthWitness> for InputValue {
     }
 }
 
+/// A path from a position in a particular commitment tree to the root of that tree.
+struct MerklePath {
+    path: [(FieldElement, bool); MAX_TREE_DEPTH],
+    depth: u32, // Logical length of the path (since the array is statically sized)
+}
+
+impl From<MerklePath> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: MerklePath) -> Self {
+        let mut map = InputMap::new();
+        map.insert("depth".to_string(), InputValue::Field(res.depth.into()));
+        map.insert("path".to_string(), InputValue::Vec(
+            res.path.into_iter().map(|(x, y)| InputValue::Vec(vec![
+                InputValue::Field(x),
+                InputValue::Field(y.into()),
+            ])).collect()
+        ));
+        InputValue::Struct(map)
+    }
+}
+
+/// Private information related to a consumed resource.
+struct ConsumedResourceWitness {
+    /// The consumed resource.
+    resource: Resource,
+    /// The path from the consumed commitment to the root of the commitment tree.
+    cm_merkle_path: MerklePath,
+    /// Nullifier key of the consumed resource.
+    nf_key: NullifierKey,
+}
+
+impl From<ConsumedResourceWitness> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: ConsumedResourceWitness) -> Self {
+        let mut map = InputMap::new();
+        map.insert("resource".to_string(), res.resource.into());
+        map.insert("cm_merkle_path".to_string(), res.cm_merkle_path.into());
+        map.insert("nf_key".to_string(), res.nf_key.into());
+        InputValue::Struct(map)
+    }
+}
+
+/// Public information of consumed resources.
+struct ConsumedResourcePublic {
+    /// The nullifier of the consumed [Resource].
+    resource_nullifier: [u8; DIGEST_BYTES],
+    /// The logic reference of the consumed [Resource].
+    resource_logic_ref: [u8; DIGEST_BYTES],
+    /// The root of the Merkle tree where the resource commitment is in.
+    commitment_tree_root: [u8; DIGEST_BYTES],
+}
+
+impl From<ConsumedResourcePublic> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: ConsumedResourcePublic) -> Self {
+        let mut map = InputMap::new();
+        map.insert("resource_nullifier".to_string(), Array(res.resource_nullifier).into());
+        map.insert("resource_logic_ref".to_string(), Array(res.resource_logic_ref).into());
+        map.insert("commitment_tree_root".to_string(), Array(res.commitment_tree_root).into());
+        InputValue::Struct(map)
+    }
+}
+
+/// Public information of created resources.
+struct CreatedResourcePublic {
+    /// The commitment to the created [Resource].
+    resource_commitment: [u8; DIGEST_BYTES],
+    /// The logic reference of the created [Resource].
+    resource_logic_ref: [u8; DIGEST_BYTES],
+}
+
+impl From<CreatedResourcePublic> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: CreatedResourcePublic) -> Self {
+        let mut map = InputMap::new();
+        map.insert("resource_commitment".to_string(), Array(res.resource_commitment).into());
+        map.insert("resource_logic_ref".to_string(), Array(res.resource_logic_ref).into());
+        InputValue::Struct(map)
+    }
+}
+
+/// A point on the embedded elliptic curve
+/// By definition, the base field of the embedded curve is the scalar field of the proof system curve, i.e the Noir Field.
+/// x and y denotes the Weierstrass coordinates of the point.
+pub struct EmbeddedCurvePoint {
+    pub x: FieldElement,
+    pub y: FieldElement,
+}
+
+impl From<EmbeddedCurvePoint> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: EmbeddedCurvePoint) -> Self {
+        let mut map = InputMap::new();
+        map.insert("x".to_string(), InputValue::Field(res.x.into()));
+        map.insert("y".to_string(), InputValue::Field(res.y.into()));
+        InputValue::Struct(map)
+    }
+}
+
+/// The compliance instance contains all public inputs to the compliance proof.
+struct ComplianceInstance {
+    /// Public information of consumed resources
+    consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
+    consumed_count: u32,
+    /// Public information of created resources
+    created_publics: [CreatedResourcePublic; MAX_CREATED],
+    created_count: u32,
+    /// The delta coordinates of the created resource
+    delta: EmbeddedCurvePoint,
+}
+
+impl From<ComplianceInstance> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: ComplianceInstance) -> Self {
+        let mut map = InputMap::new();
+        map.insert("consumed_publics".to_string(), InputValue::Vec(res.consumed_publics.into_iter().map(InputValue::from).collect()));
+        map.insert("consumed_count".to_string(), InputValue::Field(res.consumed_count.into()));
+        map.insert("created_publics".to_string(), InputValue::Vec(res.created_publics.into_iter().map(InputValue::from).collect()));
+        map.insert("created_count".to_string(), InputValue::Field(res.created_count.into()));
+        map.insert("delta".to_string(), res.delta.into());
+        InputValue::Struct(map)
+    }
+}
+
+/// Scalar for the embedded curve represented as low and high limbs
+/// By definition, the scalar field of the embedded curve is base field of the proving system curve.
+/// It may not fit into a Field element, so it is represented with two Field elements; its low and high limbs.
+pub struct EmbeddedCurveScalar {
+    pub lo: FieldElement,
+    pub hi: FieldElement,
+}
+
+impl From<EmbeddedCurveScalar> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: EmbeddedCurveScalar) -> Self {
+        let mut map = InputMap::new();
+        map.insert("lo".to_string(), InputValue::Field(res.lo.into()));
+        map.insert("hi".to_string(), InputValue::Field(res.hi.into()));
+        InputValue::Struct(map)
+    }
+}
+
+/// The compliance witness contains all private inputs to the compliance proof.
+struct ComplianceWitness {
+    /// Private information of consumed resources
+    consumed_data: [ConsumedResourceWitness; MAX_CONSUMED],
+    consumed_count: u32,
+    /// Private information of created resources
+    created_resources: [Resource; MAX_CREATED],
+    created_count: u32,
+    /// The existing root for ephemeral resources
+    ephemeral_root: [u8; DIGEST_BYTES],
+    /// Bytes of randomness for the delta commitment `rcv`
+    rcv: EmbeddedCurveScalar, // Scalar parsed to field
+}
+
+impl From<ComplianceWitness> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: ComplianceWitness) -> Self {
+        let mut map = InputMap::new();
+        map.insert("consumed_data".to_string(), InputValue::Vec(res.consumed_data.into_iter().map(InputValue::from).collect()));
+        map.insert("consumed_count".to_string(), InputValue::Field(res.consumed_count.into()));
+        map.insert("created_resources".to_string(), InputValue::Vec(res.created_resources.into_iter().map(InputValue::from).collect()));
+        map.insert("created_count".to_string(), InputValue::Field(res.created_count.into()));
+        map.insert("ephemeral_root".to_string(), Array(res.ephemeral_root).into());
+        map.insert("rcv".to_string(), res.rcv.into());
+        InputValue::Struct(map)
+    }
+}
+
 /// CLI interface for the UltraHonk based Anoma Resource Machine
 #[derive(Parser)]
 #[command(name = "nodes", version, about, long_about = None)]
@@ -397,6 +577,92 @@ mod tests {
         input_map.insert("witness".to_string(), transfer_auth.into());
         // Load up the aggregation circuit from disk
         let program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+        // Use the FFI backend which links directly to static libraries
+        let backend = FfiBackend::new().unwrap();
+        // Initialize the Barretenberg API
+        let mut api = BarretenbergApi::new(backend);
+        // Load up the aggregation circuit from disk
+        let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+        // Compute the proof from the witness bytes
+        let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+        let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+        assert!(verify_response.verified);
+    }
+
+    #[test]
+    fn test_compliance_witness() {
+        // Initialize the structured reference string
+        init_srs();
+
+        // Helper to generate the identical consumed resource entries from the TOML
+        let create_consumed_resource = || ConsumedResourceWitness {
+            resource: Resource {
+                logic_ref: [2; DIGEST_BYTES],
+                label_ref: [3; DIGEST_BYTES],
+                value_ref: [4; DIGEST_BYTES],
+                quantity: 100,
+                nonce: [5; DIGEST_BYTES],
+                nk_commitment: [
+                    206, 188, 136, 130, 254, 203, 236, 127, 184, 13, 44, 244, 179, 18, 190, 192,
+                    24, 136, 76, 45, 102, 102, 124, 103, 169, 5, 8, 33, 75, 216, 186, 252,
+                ],
+                is_ephemeral: false,
+                rand_seed: [6; DIGEST_BYTES],
+            },
+            cm_merkle_path: MerklePath {
+                depth: 0,
+                path: [(FieldElement::from(0u128), false); MAX_TREE_DEPTH],
+            },
+            nf_key: NullifierKey {
+                bytes: [1; DIGEST_BYTES],
+            },
+        };
+
+        // Helper to generate the identical created resource entries from the TOML
+        let create_created_resource = || Resource {
+            logic_ref: [2; DIGEST_BYTES],
+            label_ref: [3; DIGEST_BYTES],
+            value_ref: [4; DIGEST_BYTES],
+            quantity: 100,
+            nonce: [
+                252, 148, 204, 243, 140, 31, 54, 179, 170, 17, 251, 240, 6, 82, 245, 232,
+                123, 157, 28, 182, 32, 87, 2, 87, 35, 189, 171, 90, 51, 95, 107, 183,
+            ],
+            nk_commitment: [
+                206, 188, 136, 130, 254, 203, 236, 127, 184, 13, 44, 244, 179, 18, 190, 192,
+                24, 136, 76, 45, 102, 102, 124, 103, 169, 5, 8, 33, 75, 216, 186, 252,
+            ],
+            is_ephemeral: false,
+            rand_seed: [7; DIGEST_BYTES],
+        };
+
+        // Construct the literal ComplianceWitness object
+        let compliance_witness = ComplianceWitness {
+            consumed_count: 1,
+            created_count: 1,
+            ephemeral_root: [0; DIGEST_BYTES],
+            rcv: EmbeddedCurveScalar {
+                lo: FieldElement::from(1u128), // "0x01"
+                hi: FieldElement::from(0u128), // "0x00"
+            },
+            consumed_data: [
+                create_consumed_resource(),
+                create_consumed_resource(),
+                create_consumed_resource(),
+                create_consumed_resource(),
+            ],
+            created_resources: [
+                create_created_resource(),
+                create_created_resource(),
+                create_created_resource(),
+                create_created_resource(),
+            ],
+        };
+        // Construct inputs for proving
+        let mut input_map = InputMap::new();
+        input_map.insert("witness".to_string(), compliance_witness.into());
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from(COMPLIANCE_CIRCUIT_PATH);
         // Use the FFI backend which links directly to static libraries
         let backend = FfiBackend::new().unwrap();
         // Initialize the Barretenberg API
