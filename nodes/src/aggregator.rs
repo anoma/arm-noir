@@ -7,6 +7,9 @@ use barretenberg_rs::backends::FfiBackend;
 use barretenberg_rs::generated_types::CircuitComputeVkResponse;
 use barretenberg_rs::generated_types::ProofSystemSettings;
 use barretenberg_rs::generated_types::{CircuitInput, CircuitInputNoVK};
+use barretenberg_rs::generated_types::CircuitProveResponse;
+use barretenberg_rs::generated_types::CircuitVerifyResponse;
+use barretenberg_rs::BarretenbergError;
 use bn254_blackbox_solver::Bn254BlackBoxSolver;
 use borsh::{BorshDeserialize, BorshSerialize};
 use nargo::foreign_calls::transcript::ReplayForeignCallExecutor;
@@ -815,21 +818,7 @@ impl From<VerifierInputs> for InputMap {
     }
 }
 
-/// An aggregator that computes a Merkle root of a batch of digests.
-/// This acts as a worker node and does not delegate to further sub-aggregators.
-pub struct BarretenbergAggregator<BatchIds: Iterator, AggregatorIds: Iterator> {
-    /// The Barretenberg API used to generate and verify proofs
-    pub api: BarretenbergApi<FfiBackend>,
-    /// The ID to assign to the next sub aggregator
-    pub free_aggregator_ids: PhantomData<AggregatorIds>,
-    /// The ID to assign to the next batch
-    pub free_batch_ids: BatchIds,
-    /// Queue for raw leaf proofs (though normally pushed directly to internal for testing)
-    pub leaf_queue: Vec<[u8; 32]>,
-    /// Queue of batches waiting to be merklized
-    pub internal_queue: VecDeque<(BatchIds::Item, Vec<VerifierInputs>)>,
-    /// Queue of finished Merkle roots ready to be collected
-    pub completed_proofs: VecDeque<(BatchIds::Item, VerifierInputs)>,
+pub struct BarretenbergCircuit {
     /// The aggregation circuit
     pub circuit: CompiledProgram,
     /// The response from computing the verification key
@@ -842,21 +831,15 @@ pub struct BarretenbergAggregator<BatchIds: Iterator, AggregatorIds: Iterator> {
     pub program_bytecode: Vec<u8>,
 }
 
-impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchIds, AggregatorIds> {
-    pub fn new(free_batch_ids: BatchIds) -> Self {
-        // Load up the aggregation circuit from disk
-        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
+impl BarretenbergCircuit {
+    /// Load up the aggregation circuit from disk
+    pub fn new(api: &mut BarretenbergApi<FfiBackend>, program_artifact_path: PathBuf) -> Self {
         let artifact_name = program_artifact_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
         let circuit_name = artifact_name.to_string();
-        // Use the FFI backend which links directly to static libraries
-        let backend = FfiBackend::new().unwrap();
-        // Initialize the Barretenberg API
-        let mut api = BarretenbergApi::new(backend);
         // Load up the aggregation circuit from disk
-        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
         let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
         let Artifact::Program(program) = artifact else {
             panic!("incorrect artifact type")
@@ -890,12 +873,6 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             .circuit_compute_vk(circuit_input, proof_system_settings.clone())
             .unwrap();
         Self {
-            api,
-            free_aggregator_ids: PhantomData,
-            free_batch_ids,
-            leaf_queue: Vec::new(),
-            internal_queue: VecDeque::new(),
-            completed_proofs: VecDeque::new(),
             circuit,
             compute_vk_response,
             proof_system_settings,
@@ -904,21 +881,11 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
         }
     }
 
-    /// Combine the given two recursive proofs into a single one
-    fn combine_proofs(&mut self, left: VerifierInputs, right: VerifierInputs) -> VerifierInputs {
-        // Combine the left and right input maps into one map to produce an aggregate proof
-        let left = InputMap::from(left);
-        let mut right = InputMap::from(right);
-        let input_map: InputMap = left
-            .into_iter()
-            .map(|(k, left_value)| {
-                let right_value = right
-                    .remove(&k)
-                    .expect("left map has keys not in the right map");
-                (k, InputValue::Vec(vec![left_value, right_value]))
-            })
-            .collect();
-        assert!(right.is_empty(), "right map has keys not in the left map");
+    pub fn circuit_prove(
+        &mut self,
+        api: &mut BarretenbergApi<FfiBackend>,
+        input_map: InputMap,
+    ) -> Result<CircuitProveResponse, BarretenbergError> {
         let expected_return = None;
         let initial_witness = self
             .circuit
@@ -982,30 +949,92 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             verification_key: self.compute_vk_response.bytes.clone(),
         };
         // Compute the proof from the witness bytes
-        let prove_response = self
-            .api
-            .circuit_prove(
-                circuit_input,
-                &witness_bytes,
-                self.proof_system_settings.clone(),
-            )
-            .unwrap();
-        let verify_response = self
-            .api
-            .circuit_verify(
-                &self.compute_vk_response.bytes,
-                prove_response.public_inputs.clone(),
-                prove_response.proof.clone(),
-                self.proof_system_settings.clone(),
-            )
-            .unwrap();
+        api.circuit_prove(
+            circuit_input,
+            &witness_bytes,
+            self.proof_system_settings.clone(),
+        )
+    }
+
+    fn circuit_verify(
+        &mut self,
+        api: &mut BarretenbergApi<FfiBackend>,
+        prove_response: CircuitProveResponse,
+    ) -> Result<CircuitVerifyResponse, BarretenbergError> {
+        api.circuit_verify(
+            &self.compute_vk_response.bytes,
+            prove_response.public_inputs,
+            prove_response.proof,
+            self.proof_system_settings.clone(),
+        )
+    }
+}
+
+/// An aggregator that computes a Merkle root of a batch of digests.
+/// This acts as a worker node and does not delegate to further sub-aggregators.
+pub struct BarretenbergAggregator<BatchIds: Iterator, AggregatorIds: Iterator> {
+    /// The Barretenberg API used to generate and verify proofs
+    pub api: BarretenbergApi<FfiBackend>,
+    /// The aggregation circuit
+    pub circuit: BarretenbergCircuit,
+    /// The ID to assign to the next sub aggregator
+    pub free_aggregator_ids: PhantomData<AggregatorIds>,
+    /// The ID to assign to the next batch
+    pub free_batch_ids: BatchIds,
+    /// Queue for raw leaf proofs (though normally pushed directly to internal for testing)
+    pub leaf_queue: Vec<[u8; 32]>,
+    /// Queue of batches waiting to be merklized
+    pub internal_queue: VecDeque<(BatchIds::Item, Vec<VerifierInputs>)>,
+    /// Queue of finished Merkle roots ready to be collected
+    pub completed_proofs: VecDeque<(BatchIds::Item, VerifierInputs)>,
+}
+
+impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchIds, AggregatorIds> {
+    pub fn new(free_batch_ids: BatchIds) -> Self {
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from(AGGREGATION_CIRCUIT_PATH);
+        // Use the FFI backend which links directly to static libraries
+        let backend = FfiBackend::new().unwrap();
+        // Initialize the Barretenberg API
+        let mut api = BarretenbergApi::new(backend);
+        // Load up the aggregation circuit from disk
+        let circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+        Self {
+            api,
+            free_aggregator_ids: PhantomData,
+            free_batch_ids,
+            leaf_queue: Vec::new(),
+            internal_queue: VecDeque::new(),
+            completed_proofs: VecDeque::new(),
+            circuit,
+        }
+    }
+
+    /// Combine the given two recursive proofs into a single one
+    fn combine_proofs(&mut self, left: VerifierInputs, right: VerifierInputs) -> VerifierInputs {
+        // Combine the left and right input maps into one map to produce an aggregate proof
+        let left = InputMap::from(left);
+        let mut right = InputMap::from(right);
+        let input_map: InputMap = left
+            .into_iter()
+            .map(|(k, left_value)| {
+                let right_value = right
+                    .remove(&k)
+                    .expect("left map has keys not in the right map");
+                (k, InputValue::Vec(vec![left_value, right_value]))
+            })
+            .collect();
+        assert!(right.is_empty(), "right map has keys not in the left map");
+        // Compute the proof from the witness bytes
+        let prove_response = self.circuit.circuit_prove(&mut self.api, input_map).unwrap();
+        let verify_response = self.circuit.circuit_verify(&mut self.api, prove_response.clone()).unwrap();
         println!("Verification response: {:?}", verify_response);
         // Finally, make an output map representing the combined proofs
         VerifierInputs {
-            key_hash: self.compute_vk_response.hash.clone(),
+            key_hash: self.circuit.compute_vk_response.hash.clone(),
             proof: prove_response.proof,
             public_inputs: prove_response.public_inputs[0].clone(),
-            verification_key: self.compute_vk_response.fields.clone(),
+            verification_key: self.circuit.compute_vk_response.fields.clone(),
         }
     }
 }

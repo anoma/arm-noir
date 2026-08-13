@@ -2000,6 +2000,8 @@ dependencies = [
  "noirc_abi",
  "noirc_artifacts",
  "proptest",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
 ]
 
