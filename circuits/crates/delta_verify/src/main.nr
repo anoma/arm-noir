@@ -1,13 +1,32 @@
 use std::embedded_curve_ops::{fixed_base_scalar_mul, multi_scalar_mul, EmbeddedCurvePoint, EmbeddedCurveScalar};
 use schnorr::verify_signature;
+use core::write_bytes;
+use std::static_assert;
+global BASE_FIELD_BYTES: u32 = 32;
+global MESSAGE_BYTES: u32 = 32;
+global SCALAR_LO_BYTES: u32 = 32;
+global SCALAR_HI_BYTES: u32 = 32;
+global MAX_DELTA_DIGEST_BUF_LEN: u32 = BASE_FIELD_BYTES*2 + MESSAGE_BYTES + SCALAR_LO_BYTES*2 + SCALAR_HI_BYTES*2;
 
 // --- Main Entry Point ---
 fn main(
-    public_key: pub EmbeddedCurvePoint,
-    signature: pub (EmbeddedCurveScalar, EmbeddedCurveScalar),
-    message: pub Field,
-) {
+    public_key: EmbeddedCurvePoint,
+    signature: (EmbeddedCurveScalar, EmbeddedCurveScalar),
+    message: Field,
+) -> pub Field {
     assert(verify_signature(public_key, signature, message));
+
+    let mut buf = [0; MAX_DELTA_DIGEST_BUF_LEN];
+    let mut buf_len = 0;
+    write_bytes(&mut buf, &mut buf_len, public_key.x.to_le_bytes::<BASE_FIELD_BYTES>());
+    write_bytes(&mut buf, &mut buf_len, public_key.y.to_le_bytes::<BASE_FIELD_BYTES>());
+    write_bytes(&mut buf, &mut buf_len, message.to_le_bytes::<MESSAGE_BYTES>());
+    write_bytes(&mut buf, &mut buf_len, signature.0.lo.to_le_bytes::<SCALAR_LO_BYTES>());
+    write_bytes(&mut buf, &mut buf_len, signature.0.hi.to_le_bytes::<SCALAR_HI_BYTES>());
+    write_bytes(&mut buf, &mut buf_len, signature.1.lo.to_le_bytes::<SCALAR_LO_BYTES>());
+    write_bytes(&mut buf, &mut buf_len, signature.1.hi.to_le_bytes::<SCALAR_HI_BYTES>());
+    static_assert(buf_len == MAX_DELTA_DIGEST_BUF_LEN, "delta instance digest pre-image malformed");
+    Field::from_le_bytes(keccak256::keccak256(buf, buf_len))
 }
 
 #[test(should_fail)]
