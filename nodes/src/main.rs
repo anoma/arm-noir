@@ -1,6 +1,5 @@
 pub mod aggregator;
 
-use acir::AcirField;
 use crate::aggregator::BarretenbergAggregator;
 use std::ops::RangeFrom;
 use crate::aggregator::RecursiveAggregator;
@@ -15,6 +14,13 @@ use noirc_abi::InputMap;
 use noirc_abi::input_parser::InputValue;
 use acir::FieldElement;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use barretenberg_rs::backends::FfiBackend;
+use barretenberg_rs::BarretenbergApi;
+use nodes::BarretenbergCircuit;
+
+/// Path to file containing the aggregation circuit
+const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
 
 const DIGEST_BYTES: usize = 32;
 // Constants for bounding unbounded loops and variable-length arrays
@@ -71,6 +77,24 @@ fn bytes_to_input_value(bytes: &[u8]) -> InputValue {
             .map(|x| InputValue::Field(FieldElement::from(*x)))
             .collect(),
     )
+}
+
+fn array_to_input_value<const N: usize>(bytes: &[u8; N]) -> InputValue {
+    InputValue::Vec(
+        bytes
+            .into_iter()
+            .map(|x| InputValue::Field(FieldElement::from(*x)))
+            .collect(),
+    )
+}
+
+fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T> {
+    let mut map = InputMap::new();
+    map.insert("_is_some".to_string(), InputValue::Field(FieldElement::from(opt.is_some())));
+    if let Some(val) = opt {
+        map.insert("_value".to_string(), val.into());
+    }
+    InputValue::Struct(map)
 }
 
 /// ARM Resource
@@ -198,9 +222,7 @@ impl From<ForwarderInfo> for InputValue {
         let mut map = InputMap::new();
         map.insert("ethereum_account_addr".to_string(), bytes_to_input_value(&res.ethereum_account_addr));
         map.insert("call_type".to_string(), InputValue::Field(FieldElement::from(res.call_type)));
-        if let Some(permit) = res.permit {
-            map.insert("permit".to_string(), permit.into());
-        }
+        map.insert("permit".to_string(), option_to_input_value(res.permit));
         InputValue::Struct(map)
     }
 }
@@ -241,27 +263,13 @@ impl From<TransferAuthWitness> for InputValue {
         map.insert("resource_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.resource_ciphertext_len)));
         map.insert("discovery_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.discovery_ciphertext_len)));
         map.insert("action_root".to_string(), bytes_to_input_value(&res.action_root));
-        if let Some(auth_sig) = res.auth_sig {
-            map.insert("auth_sig".to_string(), bytes_to_input_value(&auth_sig));
-        }
-        if let Some(resource_ciphertext) = res.resource_ciphertext {
-            map.insert("resource_ciphertext".to_string(), bytes_to_input_value(&resource_ciphertext));
-        }
-        if let Some(discovery_ciphertext) = res.discovery_ciphertext {
-            map.insert("discovery_ciphertext".to_string(), bytes_to_input_value(&discovery_ciphertext));
-        }
-        if let Some(nullifier_key) = res.nullifier_key {
-            map.insert("nullifier_key".to_string(), nullifier_key.into());
-        }
-        if let Some(value_info) = res.value_info {
-            map.insert("value_info".to_string(), value_info.into());
-        }
-        if let Some(label_info) = res.label_info {
-            map.insert("label_info".to_string(), label_info.into());
-        }
-        if let Some(forwarder_info) = res.forwarder_info {
-            map.insert("forwarder_info".to_string(), forwarder_info.into());
-        }
+        map.insert("auth_sig".to_string(), option_to_input_value(res.auth_sig.as_ref().map(array_to_input_value)));
+        map.insert("resource_ciphertext".to_string(), option_to_input_value(res.resource_ciphertext.as_ref().map(array_to_input_value)));
+        map.insert("discovery_ciphertext".to_string(), option_to_input_value(res.discovery_ciphertext.as_ref().map(array_to_input_value)));
+        map.insert("nullifier_key".to_string(), option_to_input_value(res.nullifier_key));
+        map.insert("value_info".to_string(), option_to_input_value(res.value_info));
+        map.insert("label_info".to_string(), option_to_input_value(res.label_info));
+        map.insert("forwarder_info".to_string(), option_to_input_value(res.forwarder_info));
         InputValue::Struct(map)
     }
 }
@@ -346,8 +354,20 @@ fn main() {
                     rand_seed: [0; DIGEST_BYTES],
                 },
             };
-            let mut inputs = InputMap::new();
-            inputs.insert("witness".to_string(), transfer_auth.into());
+            let mut input_map = InputMap::new();
+            input_map.insert("witness".to_string(), transfer_auth.into());
+            // Load up the aggregation circuit from disk
+            let program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+            // Use the FFI backend which links directly to static libraries
+            let backend = FfiBackend::new().unwrap();
+            // Initialize the Barretenberg API
+            let mut api = BarretenbergApi::new(backend);
+            // Load up the aggregation circuit from disk
+            let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+            // Compute the proof from the witness bytes
+            let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+            let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+            println!("Verification response: {:?}", verify_response);
         },
     }
 }

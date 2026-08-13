@@ -1,25 +1,10 @@
 use acir::AcirField;
 use acir::FieldElement;
-use acir::SerializationFormat;
-use acir::circuit::Program;
 use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::backends::FfiBackend;
-use barretenberg_rs::generated_types::CircuitComputeVkResponse;
-use barretenberg_rs::generated_types::ProofSystemSettings;
-use barretenberg_rs::generated_types::{CircuitInput, CircuitInputNoVK};
-use barretenberg_rs::generated_types::CircuitProveResponse;
-use barretenberg_rs::generated_types::CircuitVerifyResponse;
-use barretenberg_rs::BarretenbergError;
-use bn254_blackbox_solver::Bn254BlackBoxSolver;
 use borsh::{BorshDeserialize, BorshSerialize};
-use nargo::foreign_calls::transcript::ReplayForeignCallExecutor;
-use nargo::foreign_calls::{DefaultForeignCallBuilder, layers};
-use noir_artifact_cli::Artifact;
-use noir_artifact_cli::execution::ExecutionResults;
-use noir_artifact_cli::execution::ReturnValues;
 use noirc_abi::InputMap;
 use noirc_abi::input_parser::InputValue;
-use noirc_artifacts::program::CompiledProgram;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -37,6 +22,7 @@ use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
+use nodes::BarretenbergCircuit;
 
 /// Path to file containing the aggregation circuit
 const AGGREGATION_CIRCUIT_PATH: &str = "../circuits/target/recursive_no_zk_aggregation.json";
@@ -815,158 +801,6 @@ impl From<VerifierInputs> for InputMap {
             ),
         );
         map
-    }
-}
-
-pub struct BarretenbergCircuit {
-    /// The aggregation circuit
-    pub circuit: CompiledProgram,
-    /// The response from computing the verification key
-    pub compute_vk_response: CircuitComputeVkResponse,
-    /// Settings to use for proving
-    pub proof_system_settings: ProofSystemSettings,
-    /// Name of the aggregation circuit
-    pub circuit_name: String,
-    /// Bytecode of the aggregation circuit
-    pub program_bytecode: Vec<u8>,
-}
-
-impl BarretenbergCircuit {
-    /// Load up the aggregation circuit from disk
-    pub fn new(api: &mut BarretenbergApi<FfiBackend>, program_artifact_path: PathBuf) -> Self {
-        let artifact_name = program_artifact_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let circuit_name = artifact_name.to_string();
-        // Load up the aggregation circuit from disk
-        let artifact = Artifact::read_from_file(&program_artifact_path).unwrap();
-        let Artifact::Program(program) = artifact else {
-            panic!("incorrect artifact type")
-        };
-        let circuit = CompiledProgram::from(program);
-        // Grab the compressed program bytecode from the circuit
-        let compressed_program_bytecode = Program::serialize_program_with_format(
-            &circuit.program,
-            SerializationFormat::default(),
-        );
-
-        // Decompress program bytecode
-        let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_program_bytecode);
-        let mut program_bytecode = Vec::new();
-        gz_decoder.read_to_end(&mut program_bytecode).unwrap();
-
-        // Proof system settings to use for generating the verification key
-        let proof_system_settings = ProofSystemSettings {
-            ipa_accumulation: false,
-            oracle_hash_type: "poseidon2".to_string(),
-            disable_zk: true,
-            optimized_solidity_verifier: false,
-        };
-        // The circuit to generate a verification key for
-        let circuit_input = CircuitInputNoVK {
-            name: circuit_name.clone(),
-            bytecode: program_bytecode.clone(),
-        };
-        // Compute the verification key
-        let compute_vk_response = api
-            .circuit_compute_vk(circuit_input, proof_system_settings.clone())
-            .unwrap();
-        Self {
-            circuit,
-            compute_vk_response,
-            proof_system_settings,
-            circuit_name,
-            program_bytecode,
-        }
-    }
-
-    pub fn circuit_prove(
-        &mut self,
-        api: &mut BarretenbergApi<FfiBackend>,
-        input_map: InputMap,
-    ) -> Result<CircuitProveResponse, BarretenbergError> {
-        let expected_return = None;
-        let initial_witness = self
-            .circuit
-            .abi
-            .encode(&input_map, None)
-            .expect("unable to encode initial witness");
-
-        // Construct foreign call executor for circuit execution
-        let transcript_executor: layers::Either<ReplayForeignCallExecutor<_>, _> =
-            layers::Either::Right(layers::Unhandled);
-
-        let mut foreign_call_executor = DefaultForeignCallBuilder {
-            output: std::io::stdout(),
-            enable_mocks: false,
-            resolver_url: None,
-            root_path: None,
-            package_name: None,
-        }
-        .build_with_base(transcript_executor);
-        // Execute the circuit on the given inputs
-        let blackbox_solver = Bn254BlackBoxSolver;
-        let witness_stack = nargo::ops::execute_program(
-            &self.circuit.program,
-            initial_witness,
-            &blackbox_solver,
-            &mut foreign_call_executor,
-        )
-        .expect("circuit execution error");
-        // Extract certain witnesses from the stack
-        let main_witness = &witness_stack
-            .peek()
-            .expect("Should have at least one witness on the stack")
-            .witness;
-
-        let (_, actual_return) = self
-            .circuit
-            .abi
-            .decode(main_witness)
-            .expect("unable to decode main witness");
-        let results = ExecutionResults {
-            witness_stack,
-            return_values: ReturnValues {
-                actual_return,
-                expected_return,
-            },
-        };
-        // Extract the execution witness
-        let compressed_witness_bytes = results
-            .witness_stack
-            .serialize()
-            .expect("output witness creation failed");
-
-        // Decompress witness bytes
-        let mut gz_decoder = flate2::read::GzDecoder::new(&*compressed_witness_bytes);
-        let mut witness_bytes = Vec::new();
-        gz_decoder.read_to_end(&mut witness_bytes).unwrap();
-        // The circuit to generate a proof from
-        let circuit_input = CircuitInput {
-            name: self.circuit_name.clone(),
-            bytecode: self.program_bytecode.clone(),
-            verification_key: self.compute_vk_response.bytes.clone(),
-        };
-        // Compute the proof from the witness bytes
-        api.circuit_prove(
-            circuit_input,
-            &witness_bytes,
-            self.proof_system_settings.clone(),
-        )
-    }
-
-    fn circuit_verify(
-        &mut self,
-        api: &mut BarretenbergApi<FfiBackend>,
-        prove_response: CircuitProveResponse,
-    ) -> Result<CircuitVerifyResponse, BarretenbergError> {
-        api.circuit_verify(
-            &self.compute_vk_response.bytes,
-            prove_response.public_inputs,
-            prove_response.proof,
-            self.proof_system_settings.clone(),
-        )
     }
 }
 
