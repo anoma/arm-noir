@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
 // You may need to define this constant at the top of your file alongside TRANSFER_AUTH_CIRCUIT_PATH
 const COMPLIANCE_CIRCUIT_PATH: &str = "../circuits/target/compliance.json";
+// You may need to define this constant at the top of your file alongside DELTA_VERIFY_CIRCUIT_PATH
+const DELTA_VERIFY_CIRCUIT_PATH: &str = "../circuits/target/delta_verify.json";
 
 const DIGEST_BYTES: usize = 32;
 // Constants for bounding unbounded loops and variable-length arrays
@@ -106,7 +108,7 @@ impl<const N: usize> Default for Array<N> {
 }
 
 /// ARM Resource
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone, Copy)]
 pub struct Resource {
     /// a succinct representation of the predicate associated with the resource
     pub logic_ref: [u8; DIGEST_BYTES],
@@ -143,7 +145,7 @@ impl From<Resource> for InputValue {
 }
 
 /// Nullifier key
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct NullifierKey {
     pub bytes: [u8; DIGEST_BYTES],
 }
@@ -305,6 +307,7 @@ impl From<TransferAuthWitness> for InputValue {
 }
 
 /// A path from a position in a particular commitment tree to the root of that tree.
+#[derive(Clone, Copy)]
 struct MerklePath {
     path: [(FieldElement, bool); MAX_TREE_DEPTH],
     depth: u32, // Logical length of the path (since the array is statically sized)
@@ -326,6 +329,7 @@ impl From<MerklePath> for InputValue {
 }
 
 /// Private information related to a consumed resource.
+#[derive(Clone, Copy)]
 struct ConsumedResourceWitness {
     /// The consumed resource.
     resource: Resource,
@@ -529,7 +533,12 @@ mod tests {
                 bytes: [0; DIGEST_BYTES],
             }),
             value_info: Some(ValueInfo {
-                auth_pk: [0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8],
+                auth_pk: [
+                    0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+                    0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17,
+                    0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08,
+                    0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8,
+                ],
                 encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
             }),
             auth_sig: Some([
@@ -595,7 +604,7 @@ mod tests {
         init_srs();
 
         // Helper to generate the identical consumed resource entries from the TOML
-        let create_consumed_resource = || ConsumedResourceWitness {
+        let create_consumed_resource = ConsumedResourceWitness {
             resource: Resource {
                 logic_ref: [2; DIGEST_BYTES],
                 label_ref: [3; DIGEST_BYTES],
@@ -619,7 +628,7 @@ mod tests {
         };
 
         // Helper to generate the identical created resource entries from the TOML
-        let create_created_resource = || Resource {
+        let create_created_resource = Resource {
             logic_ref: [2; DIGEST_BYTES],
             label_ref: [3; DIGEST_BYTES],
             value_ref: [4; DIGEST_BYTES],
@@ -646,16 +655,16 @@ mod tests {
                 hi: FieldElement::from(0u128), // "0x00"
             },
             consumed_data: [
-                create_consumed_resource(),
-                create_consumed_resource(),
-                create_consumed_resource(),
-                create_consumed_resource(),
+                create_consumed_resource,
+                create_consumed_resource,
+                create_consumed_resource,
+                create_consumed_resource,
             ],
             created_resources: [
-                create_created_resource(),
-                create_created_resource(),
-                create_created_resource(),
-                create_created_resource(),
+                create_created_resource,
+                create_created_resource,
+                create_created_resource,
+                create_created_resource,
             ],
         };
         // Construct inputs for proving
@@ -663,6 +672,42 @@ mod tests {
         input_map.insert("witness".to_string(), compliance_witness.into());
         // Load up the aggregation circuit from disk
         let program_artifact_path = PathBuf::from(COMPLIANCE_CIRCUIT_PATH);
+        // Use the FFI backend which links directly to static libraries
+        let backend = FfiBackend::new().unwrap();
+        // Initialize the Barretenberg API
+        let mut api = BarretenbergApi::new(backend);
+        // Load up the aggregation circuit from disk
+        let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+        // Compute the proof from the witness bytes
+        let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+        let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+        assert!(verify_response.verified);
+    }
+
+    #[test]
+    fn test_delta_verify_witness() {
+        // Initialize the structured reference string
+        init_srs();
+        let public_key = EmbeddedCurvePoint {
+            x: FieldElement::try_from_str("0x2c39bbbde2d0ffcb5c4317dcbfa1771cf554a2f33c647446632fa707a5bf5f3f").unwrap(),
+            y: FieldElement::try_from_str("0x2b9c81935298af5ebe22f1a7279bb76781e6cadba3fb6c5c41ed942392dc687c").unwrap(),
+        };
+        let sig_s = EmbeddedCurveScalar {
+            lo: FieldElement::try_from_str("0x5fd1ac0ad411110674830c54cb506212").unwrap(),
+            hi: FieldElement::try_from_str("0x281906862cdb4e0efec7226d757fe803").unwrap(),
+        };
+        let sig_e = EmbeddedCurveScalar {
+            lo: FieldElement::try_from_str("0x6c368959f958e525d761d06c47fd2ad6").unwrap(),
+            hi: FieldElement::try_from_str("0x013f6a902c6c0efafdadbd4de409690d").unwrap(),
+        };
+        let message = FieldElement::try_from_str("0x2bc").unwrap();
+        // Construct inputs for proving
+        let mut input_map = InputMap::new();
+        input_map.insert("public_key".to_string(), public_key.into());
+        input_map.insert("message".to_string(), InputValue::Field(message));
+        input_map.insert("signature".to_string(), InputValue::Vec(vec![sig_s.into(), sig_e.into()]));
+        // Load up the aggregation circuit from disk
+        let program_artifact_path = PathBuf::from(DELTA_VERIFY_CIRCUIT_PATH);
         // Use the FFI backend which links directly to static libraries
         let backend = FfiBackend::new().unwrap();
         // Initialize the Barretenberg API
