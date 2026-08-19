@@ -7,8 +7,6 @@ use alloy::primitives::B512;
 use alloy::signers::k256::ecdsa::SigningKey;
 use alloy::signers::local::PrivateKeySigner;
 use bech32::Hrp;
-use borsh::BorshDeserialize;
-use borsh::BorshSerialize;
 use serde::Deserializer;
 use serde::Serializer;
 use serde::{Deserialize, Serialize};
@@ -22,10 +20,7 @@ use std::marker::PhantomData;
 use std::str::FromStr;
 use k256::ecdsa::VerifyingKey;
 use k256::PublicKey;
-use k256::ecdh::EphemeralSecret;
 use k256::SecretKey;
-use rand_core::CryptoRng;
-use rand_core::RngCore;
 use k256::schnorr::CryptoRngCore;
 
 // Ethereum block height
@@ -60,7 +55,7 @@ pub const SECRET_KEY_LEN: usize = 32;
 pub const PUBLIC_KEY_LEN: usize = 33;
 pub const SIGNING_KEY_LEN: usize = 32;
 
-type ExtendedFullViewingKey = (VerifyingKey, SecretKey);
+pub type ExtendedFullViewingKey = (VerifyingKey, SecretKey);
 
 impl Bech32 for ExtendedFullViewingKey {
     const HRP: &str = "zxviewtestsapling";
@@ -87,7 +82,7 @@ impl Bech32 for ExtendedFullViewingKey {
     }
 }
 
-type PaymentAddress = (VerifyingKey, PublicKey);
+pub type PaymentAddress = (VerifyingKey, PublicKey);
 
 impl Bech32 for PaymentAddress {
     const HRP: &str = "ztestsapling";
@@ -114,7 +109,7 @@ impl Bech32 for PaymentAddress {
     }
 }
 
-type ExtendedSpendingKey = (SigningKey, SecretKey);
+pub type ExtendedSpendingKey = (SigningKey, SecretKey);
 
 impl Bech32 for ExtendedSpendingKey {
     const HRP: &str = "secret-extended-key-test";

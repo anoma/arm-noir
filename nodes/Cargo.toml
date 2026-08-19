@@ -23,6 +23,7 @@ age = "0.12.1"
 toml = "1.1.4"
 bech32 = "0.12.0"
 rand_core = "0.10.1"
+rand = "0.8"
 alloy = "2.1.1"
 alloy-signer = "2.1.1"
 k256 = { version = "0.13.4", features = ["ecdh"] }

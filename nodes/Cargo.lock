@@ -3954,6 +3954,7 @@ dependencies = [
  "noirc_abi",
  "noirc_artifacts",
  "proptest",
+ "rand 0.8.7",
  "rand_core 0.10.1",
  "serde",
  "serde_json",
