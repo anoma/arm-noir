@@ -1,5 +1,6 @@
 pub mod aggregator;
 pub mod client;
+pub mod wallet;
 
 use nodes::init_srs;
 use clap::{Parser, Args, Subcommand};
@@ -37,13 +38,16 @@ fn aggregator_server<B: ToSocketAddrs>(address: &B, thread_count: usize) {
     }
 }
 
-/// CLI interface for the UltraHonk based Anoma Resource Machine
+/// CLI interface for the UltraHonk based AnomaPay implementation
 #[derive(Parser)]
 #[command(name = "nodes", version, about, long_about = None)]
 enum Cli {
-    /// Run the proof aggregator
+    /// Manage the keys that are used in the client and aggregator
+    #[command(subcommand)]
+    Wallet(WalletCommands),
+    /// Run proof aggregator server. Accepts multiple proofs and batches them into one.
     Aggregator(AggregatorArgs),
-    /// Run the transfer client
+    /// Submit transfers to the smart contract and do Permit2 approvals
     #[command(subcommand)]
     Client(ClientCommands),
 }
@@ -51,9 +55,51 @@ enum Cli {
 #[derive(Args)]
 struct AggregatorArgs {
     /// The address at which the aggregator server will run
+    #[arg(long)]
     address: String,
     /// Number of aggregator threads to run
+    #[arg(long)]
     thread_count: usize,
+}
+
+
+#[derive(Subcommand)]
+enum WalletCommands {
+    /// Generates a key
+    Generate {
+        /// Alias to give the generated key
+        #[arg(long)]
+        alias: String,
+        /// Generate a shielded key
+        #[arg(long)]
+        shielded: bool,
+    },
+    /// Stores a given bech32 encoded value
+    Store {
+        /// Alias under which to store the value
+        #[arg(long)]
+        alias: String,
+        /// Spending key, viewing key, payment address, signing key, public key, or Ethereum address
+        #[arg(long)]
+        value: String,
+    },
+    /// Lists all keys and addresses in the wallet
+    List,
+    /// Views non-secret (or secret) details about a given key
+    View {
+        /// Alias to to display information about
+        #[arg(long)]
+        alias: String,
+        /// Decrypt the data if possible
+        #[arg(long)]
+        decrypt: bool,
+    },
+    /// Removes a given alias from the wallet
+    Remove {
+        /// Alias to remove from the wallet
+        #[arg(long)]
+        alias: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -109,6 +155,9 @@ fn main() {
         },
         Cli::Client(cmds) => {
             // Client implementation...
+        },
+        Cli::Wallet(cmds) => {
+            // Wallet implementation...
         },
     }
 }
