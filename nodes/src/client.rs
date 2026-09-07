@@ -10,7 +10,7 @@ const COMPLIANCE_CIRCUIT_PATH: &str = "../circuits/target/compliance.json";
 // You may need to define this constant at the top of your file alongside DELTA_VERIFY_CIRCUIT_PATH
 const DELTA_VERIFY_CIRCUIT_PATH: &str = "../circuits/target/delta_verify.json";
 
-const DIGEST_BYTES: usize = 32;
+pub const DIGEST_BYTES: usize = 32;
 // Constants for bounding unbounded loops and variable-length arrays
 const MAX_FORWARDER_ADDR_LEN: usize = 20;
 const MAX_ERC20_TOKEN_ADDR_LEN: usize = 20;

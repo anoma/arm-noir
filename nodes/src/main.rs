@@ -4,7 +4,7 @@ pub mod wallet;
 
 use nodes::init_srs;
 use clap::{Parser, Args, Subcommand};
-use crate::aggregator::BarretenbergAggregator;
+use aggregator::BarretenbergAggregator;
 use std::ops::RangeFrom;
 use aggregator::RecursiveAggregator;
 use aggregator::VerifierInputs;
@@ -22,6 +22,10 @@ use std::path::Path;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::primitives::Address;
 use std::io::Write;
+use std::collections::HashMap;
+use client::Resource;
+use client::DIGEST_BYTES;
+use rand::Rng;
 
 /// CLI interface for the UltraHonk based AnomaPay implementation
 #[derive(Parser)]
@@ -103,6 +107,9 @@ enum ClientCommands {
         /// The amount to be sent
         #[arg(long)]
         amount: u64,
+        /// The token being sent
+        #[arg(long)]
+        token: String,
         /// The shielded pool to submit transaction to
         #[arg(long)]
         pool: String,
@@ -307,6 +314,45 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+// Handle client subcommands
+fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
+    let wallet_path = Path::new("wallet.toml");
+    // Attempt to load the wallet, or default to empty if it doesn't exist
+    let store = Store::load(wallet_path).unwrap_or_default();
+    let mut rng = rand::thread_rng();
+    match cli {
+        ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
+            // Obtain the key to authorize the transaction
+            let pksigner = signer.clone().unwrap_or(from.clone());
+            let passphrase =
+                prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", pksigner));
+            let pksigner = store.decrypt_signing_key(pksigner, passphrase)?;
+            let pksigner = PrivateKeySigner::from_signing_key(pksigner);
+            let mut keys = HashMap::new();
+            keys.insert(pksigner.address(), pksigner.clone());
+            // Add transaction inputs
+            if store.spending_keys.contains_key(&from) {
+                // Obtain the key to authorize the transaction
+                let passphrase =
+                    prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
+                let spending_key = store.decrypt_spending_key(from, passphrase)?;
+                /*let mut rand_seed = [0u8; DIGEST_BYTES];
+                rng.fill(&mut rand_seed);
+                let mut nonce = [0u8; DIGEST_BYTES];
+                rng.fill(&mut nonce);
+                let resource = Resource {
+                    value_ref: [0u8; DIGEST_BYTES],
+                    is_ephemeral: false,
+                    rand_seed,
+                    nonce,
+                };*/
+            }
+        },
+        ClientCommands::Approve { rpc, spender, signer, token } => {},
+    }
+    Ok(())
+}
+
 /// Run the aggregator
 fn main() -> Result<(), std::io::Error> {
     let cli = Cli::parse();
@@ -318,8 +364,9 @@ fn main() -> Result<(), std::io::Error> {
             // Finally, start the aggregator server
             aggregator_server(&args.address, args.thread_count);
         },
-        Cli::Client(_cmds) => {
-            // Client implementation...
+        Cli::Client(cmds) => {
+            // Delegate to client functions
+            handle_client(cmds)?;
         },
         Cli::Wallet(cmds) => {
             // Delegate to wallet functions
