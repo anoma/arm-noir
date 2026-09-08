@@ -26,6 +26,21 @@ use std::collections::HashMap;
 use client::Resource;
 use client::DIGEST_BYTES;
 use rand::Rng;
+use std::path::PathBuf;
+use client::TRANSFER_AUTH_CIRCUIT_PATH;
+use barretenberg_rs::backends::FfiBackend;
+use barretenberg_rs::BarretenbergApi;
+use nodes::BarretenbergCircuit;
+use alloy::primitives::address;
+use wallet::NullifierKey;
+use alloy::primitives::keccak256;
+
+// ERC-20 forwarder address
+const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
+const FORWARDER_ADDR_LEN: usize = 20;
+const ERC20_TOKEN_ADDR_LEN: usize = 20;
+const MAX_AUTH_PK_LEN: usize = 65;
+const MAX_ENCRYPTION_PK_LEN: usize = 65;
 
 /// CLI interface for the UltraHonk based AnomaPay implementation
 #[derive(Parser)]
@@ -322,6 +337,20 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let mut rng = rand::thread_rng();
     match cli {
         ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
+            // Load up the aggregation circuit from disk
+            let program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+            // Use the FFI backend which links directly to static libraries
+            let backend = FfiBackend::new().unwrap();
+            // Initialize the Barretenberg API
+            let mut api = BarretenbergApi::new(backend);
+            // Load up the aggregation circuit from disk
+            let circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+            // The resource logic reference is the UltraHonk verification key hash
+            let logic_ref = circuit
+                .compute_vk_response
+                .hash
+                .try_into()
+                .expect("verification key hash has incorrect length");
             // Obtain the key to authorize the transaction
             let pksigner = signer.clone().unwrap_or(from.clone());
             let passphrase =
@@ -330,22 +359,63 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let pksigner = PrivateKeySigner::from_signing_key(pksigner);
             let mut keys = HashMap::new();
             keys.insert(pksigner.address(), pksigner.clone());
+            // Compute the label reference
+            let erc20_token_addr = store.evaluate_address(&token)?;
+            let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+            label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+            label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+            let label_ref = keccak256(label_ref_bytes);
             // Add transaction inputs
             if store.spending_keys.contains_key(&from) {
                 // Obtain the key to authorize the transaction
                 let passphrase =
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
-                /*let mut rand_seed = [0u8; DIGEST_BYTES];
+            } else {
+                // Generate randomness for the construction of the resource
+                let mut rand_seed = [0u8; DIGEST_BYTES];
                 rng.fill(&mut rand_seed);
                 let mut nonce = [0u8; DIGEST_BYTES];
                 rng.fill(&mut nonce);
+                // Generate a nullifier key
+                let nullifier_key = NullifierKey::random(&mut rng);
+                // Calculate ephemeral value reference
+                let value_ref = keccak256(ERC20_FORWARDER_ADDRESS.as_slice());
+                // The ephemeral resource
                 let resource = Resource {
-                    value_ref: [0u8; DIGEST_BYTES],
+                    value_ref: value_ref.0,
+                    is_ephemeral: true,
+                    rand_seed,
+                    nonce,
+                    quantity: amount.into(),
+                    logic_ref,
+                    label_ref: label_ref.0,
+                    nk_commitment: nullifier_key.commit(),
+                };
+            }
+            // Add transaction outputs
+            if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
+                // Generate randomness for the construction of the resource
+                let mut rand_seed = [0u8; DIGEST_BYTES];
+                rng.fill(&mut rand_seed);
+                let mut nonce = [0u8; DIGEST_BYTES];
+                rng.fill(&mut nonce);
+                // Calculate persistent value reference
+                let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
+                value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&payment_addr.0.to_sec1_bytes());
+                value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&payment_addr.1.to_sec1_bytes());
+                let value_ref = keccak256(value_ref_bytes);
+                // The permanent resource
+                let resource = Resource {
+                    value_ref: value_ref.0,
                     is_ephemeral: false,
                     rand_seed,
                     nonce,
-                };*/
+                    quantity: amount.into(),
+                    logic_ref,
+                    label_ref: label_ref.0,
+                    nk_commitment: payment_addr.2,
+                };
             }
         },
         ClientCommands::Approve { rpc, spender, signer, token } => {},

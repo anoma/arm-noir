@@ -4,7 +4,7 @@ use acir::FieldElement;
 use serde::{Deserialize, Serialize};
 
 /// Path to file containing the aggregation circuit
-const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
+pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
 // You may need to define this constant at the top of your file alongside TRANSFER_AUTH_CIRCUIT_PATH
 const COMPLIANCE_CIRCUIT_PATH: &str = "../circuits/target/compliance.json";
 // You may need to define this constant at the top of your file alongside DELTA_VERIFY_CIRCUIT_PATH
