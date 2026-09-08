@@ -75,10 +75,6 @@ impl NullifierKey {
     }
 }
 
-pub type NullifierKeyCommitment = [u8; NULLIFIER_KEY_COMMITMENT_LEN];
-
-pub type ExtendedFullViewingKey = (VerifyingKey, SecretKey, NullifierKeyCommitment);
-
 fn write_bytes(dest: &mut [u8], offset: &mut usize, src: &[u8]) {
     let next_offset = *offset + src.len();
     dest[*offset..next_offset].copy_from_slice(src);
@@ -93,15 +89,35 @@ fn read_bytes<const N: usize>(src: &[u8], offset: &mut usize) -> [u8; N] {
     dest
 }
 
+pub type NullifierKeyCommitment = [u8; NULLIFIER_KEY_COMMITMENT_LEN];
+
+#[derive(Clone, Debug)]
+pub struct ExtendedFullViewingKey {
+    pub verifying_key: VerifyingKey,
+    pub secret_key: SecretKey,
+    pub nullifier_key_commitment: NullifierKeyCommitment,
+}
+
+impl ExtendedFullViewingKey {
+    /// Convert to a payment address
+    pub fn to_payment_address(&self) -> PaymentAddress {
+        PaymentAddress {
+            verifying_key: self.verifying_key,
+            public_key: self.secret_key.public_key(),
+            nullifier_key_commitment: self.nullifier_key_commitment,
+        }
+    }
+}
+
 impl Bech32 for ExtendedFullViewingKey {
     const HRP: &str = "zxviewtestsapling";
 
     fn to_vec(&self) -> std::io::Result<Vec<u8>> {
         let mut bytes = [0u8; VERIFYING_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_COMMITMENT_LEN];
         let mut offset = 0;
-        write_bytes(&mut bytes, &mut offset, &self.0.to_sec1_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.1.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.2);
+        write_bytes(&mut bytes, &mut offset, &self.verifying_key.to_sec1_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.secret_key.to_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment);
         Ok(bytes.to_vec())
     }
 
@@ -118,11 +134,16 @@ impl Bech32 for ExtendedFullViewingKey {
         let sk = SecretKey::from_slice(&read_bytes::<SECRET_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
         let nk_commit = read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset);
-        Ok((vk, sk, nk_commit))
+        Ok(Self { verifying_key: vk, secret_key: sk, nullifier_key_commitment: nk_commit })
     }
 }
 
-pub type PaymentAddress = (VerifyingKey, PublicKey, NullifierKeyCommitment);
+#[derive(Clone, Debug, Copy)]
+pub struct PaymentAddress {
+    pub verifying_key: VerifyingKey,
+    pub public_key: PublicKey,
+    pub nullifier_key_commitment: NullifierKeyCommitment,
+}
 
 impl Bech32 for PaymentAddress {
     const HRP: &str = "ztestsapling";
@@ -130,9 +151,9 @@ impl Bech32 for PaymentAddress {
     fn to_vec(&self) -> std::io::Result<Vec<u8>> {
         let mut bytes = [0u8; VERIFYING_KEY_LEN + PUBLIC_KEY_LEN + NULLIFIER_KEY_COMMITMENT_LEN];
         let mut offset = 0;
-        write_bytes(&mut bytes, &mut offset, &self.0.to_sec1_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.1.to_sec1_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.2);
+        write_bytes(&mut bytes, &mut offset, &self.verifying_key.to_sec1_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.public_key.to_sec1_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment);
         Ok(bytes.to_vec())
     }
 
@@ -146,14 +167,37 @@ impl Bech32 for PaymentAddress {
         let mut offset = 0;
         let vk = VerifyingKey::from_sec1_bytes(&read_bytes::<VERIFYING_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
-        let sk = PublicKey::from_sec1_bytes(&read_bytes::<PUBLIC_KEY_LEN>(v, &mut offset))
+        let pk = PublicKey::from_sec1_bytes(&read_bytes::<PUBLIC_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
         let nk_commit = read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset);
-        Ok((vk, sk, nk_commit))
+        Ok(Self { verifying_key: vk, public_key: pk, nullifier_key_commitment: nk_commit })
     }
 }
 
-pub type ExtendedSpendingKey = (SigningKey, SecretKey, NullifierKey);
+#[derive(Clone, Debug)]
+pub struct ExtendedSpendingKey {
+    pub signing_key: SigningKey,
+    pub secret_key: SecretKey,
+    pub nullifier_key: NullifierKey,
+}
+
+impl ExtendedSpendingKey {
+    /// Generate an extended spending key
+    pub fn random(rng: &mut impl CryptoRngCore) -> Self {
+        let signing_key = SigningKey::random(rng);
+        let secret_key = SecretKey::random(rng);
+        let nullifier_key = NullifierKey::random(rng);
+        Self { signing_key, secret_key, nullifier_key }
+    }
+    /// Convert to an extended full viewing key
+    pub fn to_viewing_key(&self) -> ExtendedFullViewingKey {
+        ExtendedFullViewingKey {
+            verifying_key: *self.signing_key.verifying_key(),
+            secret_key: self.secret_key.clone(),
+            nullifier_key_commitment: self.nullifier_key.commit(),
+        }
+    }
+}
 
 impl Bech32 for ExtendedSpendingKey {
     const HRP: &str = "secret-extended-key-test";
@@ -161,9 +205,9 @@ impl Bech32 for ExtendedSpendingKey {
     fn to_vec(&self) -> std::io::Result<Vec<u8>> {
         let mut bytes = [0u8; SIGNING_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_LEN];
         let mut offset = 0;
-        write_bytes(&mut bytes, &mut offset, &self.0.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.1.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.2.0);
+        write_bytes(&mut bytes, &mut offset, &self.signing_key.to_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.secret_key.to_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.nullifier_key.0);
         Ok(bytes.to_vec())
     }
 
@@ -180,7 +224,7 @@ impl Bech32 for ExtendedSpendingKey {
         let sk = SecretKey::from_slice(&read_bytes::<SECRET_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
         let nk = read_bytes::<NULLIFIER_KEY_LEN>(v, &mut offset);
-        Ok((vk, sk, NullifierKey(nk)))
+        Ok(Self { signing_key: vk, secret_key: sk, nullifier_key: NullifierKey(nk) })
     }
 }
 
@@ -296,10 +340,7 @@ impl Store {
         rng: &mut impl CryptoRngCore,
         passphrase: String,
     ) -> Result<ExtendedSpendingKey, EncryptError> {
-        let signing_key = SigningKey::random(rng);
-        let secret_key = SecretKey::random(rng);
-        let nullifier_key = NullifierKey::random(rng);
-        let spending_key = (signing_key, secret_key, nullifier_key);
+        let spending_key = ExtendedSpendingKey::random(rng);
         self.store_spending_key(alias, &spending_key, passphrase)?;
         Ok(spending_key)
     }
@@ -318,10 +359,10 @@ impl Store {
         self.spending_keys
             .insert(alias.clone(), Encrypted(encrypted.to_vec(), PhantomData));
         // Store the full viewing key corresponding to this spending key
-        let extfvk = (*extsk.0.verifying_key(), extsk.1.clone(), extsk.2.commit());
+        let extfvk = extsk.to_viewing_key();
         self.viewing_keys.insert(alias.clone(), Bech32Encoded(extfvk.clone()));
         // Derive the payment address corresponding to this spending key
-        let pa = (extfvk.0, extfvk.1.public_key(), extfvk.2);
+        let pa = extfvk.to_payment_address();
         self.payment_addrs.insert(alias, Bech32Encoded(pa));
         Ok(())
     }
@@ -331,7 +372,7 @@ impl Store {
         self.remove(&alias);
         self.viewing_keys.insert(alias.clone(), Bech32Encoded(key.clone()));
         // Derive the payment address corresponding to this spending key
-        let pa = (key.0, key.1.public_key(), key.2);
+        let pa = key.to_payment_address();
         self.payment_addrs.insert(alias, Bech32Encoded(pa));
     }
     // Store the given Ethereum address under the given alias clearing all existing

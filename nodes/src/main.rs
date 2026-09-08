@@ -402,8 +402,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 rng.fill(&mut nonce);
                 // Calculate persistent value reference
                 let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
-                value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&payment_addr.0.to_sec1_bytes());
-                value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&payment_addr.1.to_sec1_bytes());
+                value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&payment_addr.verifying_key.to_sec1_bytes());
+                value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&payment_addr.public_key.to_sec1_bytes());
                 let value_ref = keccak256(value_ref_bytes);
                 // The permanent resource
                 let resource = Resource {
@@ -414,7 +414,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     quantity: amount.into(),
                     logic_ref,
                     label_ref: label_ref.0,
-                    nk_commitment: payment_addr.2,
+                    nk_commitment: payment_addr.nullifier_key_commitment,
                 };
             }
         },
