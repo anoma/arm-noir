@@ -70,8 +70,8 @@ impl NullifierKey {
         Self(nk)
     }
     /// Compute the commitment to the nullifier key
-    pub fn commit(self) -> [u8; NULLIFIER_KEY_COMMITMENT_LEN] {
-        keccak256(self.0).0
+    pub fn commit(self) -> NullifierKeyCommitment {
+        NullifierKeyCommitment(keccak256(self.0).0)
     }
 }
 
@@ -89,7 +89,8 @@ fn read_bytes<const N: usize>(src: &[u8], offset: &mut usize) -> [u8; N] {
     dest
 }
 
-pub type NullifierKeyCommitment = [u8; NULLIFIER_KEY_COMMITMENT_LEN];
+#[derive(Clone, Copy, Debug)]
+pub struct NullifierKeyCommitment(pub [u8; NULLIFIER_KEY_COMMITMENT_LEN]);
 
 #[derive(Clone, Debug)]
 pub struct ExtendedFullViewingKey {
@@ -117,7 +118,7 @@ impl Bech32 for ExtendedFullViewingKey {
         let mut offset = 0;
         write_bytes(&mut bytes, &mut offset, &self.verifying_key.to_sec1_bytes());
         write_bytes(&mut bytes, &mut offset, &self.secret_key.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment);
+        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment.0);
         Ok(bytes.to_vec())
     }
 
@@ -133,7 +134,7 @@ impl Bech32 for ExtendedFullViewingKey {
             .map_err(std::io::Error::other)?;
         let sk = SecretKey::from_slice(&read_bytes::<SECRET_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
-        let nk_commit = read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset);
+        let nk_commit = NullifierKeyCommitment(read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset));
         Ok(Self { verifying_key: vk, secret_key: sk, nullifier_key_commitment: nk_commit })
     }
 }
@@ -153,7 +154,7 @@ impl Bech32 for PaymentAddress {
         let mut offset = 0;
         write_bytes(&mut bytes, &mut offset, &self.verifying_key.to_sec1_bytes());
         write_bytes(&mut bytes, &mut offset, &self.public_key.to_sec1_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment);
+        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment.0);
         Ok(bytes.to_vec())
     }
 
@@ -169,7 +170,7 @@ impl Bech32 for PaymentAddress {
             .map_err(std::io::Error::other)?;
         let pk = PublicKey::from_sec1_bytes(&read_bytes::<PUBLIC_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
-        let nk_commit = read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset);
+        let nk_commit = NullifierKeyCommitment(read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset));
         Ok(Self { verifying_key: vk, public_key: pk, nullifier_key_commitment: nk_commit })
     }
 }
@@ -250,9 +251,9 @@ impl<X: Bech32> FromStr for Bech32Encoded<X> {
             return Err(format!("Invalid HRP: expected {}, got {}", X::HRP, hrp));
         }
 
-        // FullViewingKey is typically 96 bytes (ak, nk, ovk)
+        // Deserialize the bytes
         let fvk = X::from_slice(&data[..])
-            .map_err(|e| format!("Failed to parse FullViewingKey bytes: {}", e))?;
+            .map_err(|e| format!("Failed to parse {} bytes: {}", X::HRP, e))?;
 
         Ok(Bech32Encoded(fvk))
     }

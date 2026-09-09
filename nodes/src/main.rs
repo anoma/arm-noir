@@ -390,7 +390,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     quantity: amount.into(),
                     logic_ref,
                     label_ref: label_ref.0,
-                    nk_commitment: nullifier_key.commit(),
+                    nk_commitment: nullifier_key.commit().0,
                 };
             }
             // Add transaction outputs
@@ -414,7 +414,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     quantity: amount.into(),
                     logic_ref,
                     label_ref: label_ref.0,
-                    nk_commitment: payment_addr.nullifier_key_commitment,
+                    nk_commitment: payment_addr.nullifier_key_commitment.0,
                 };
             }
         },
