@@ -371,7 +371,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let passphrase =
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
-            } else {
+            } else if let Ok(addr) = store.evaluate_address(&from) {
                 // Generate randomness for the construction of the resource
                 let mut rand_seed = [0u8; DIGEST_BYTES];
                 rng.fill(&mut rand_seed);
@@ -380,7 +380,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 // Generate a nullifier key
                 let nullifier_key = NullifierKey::random(&mut rng);
                 // Calculate ephemeral value reference
-                let value_ref = keccak256(ERC20_FORWARDER_ADDRESS.as_slice());
+                let value_ref = keccak256(addr.as_slice());
                 // The ephemeral resource
                 let resource = Resource {
                     value_ref: value_ref.0,
@@ -415,6 +415,27 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     logic_ref,
                     label_ref: label_ref.0,
                     nk_commitment: payment_addr.nullifier_key_commitment.0,
+                };
+            } else if let Ok(addr) = store.evaluate_address(&to) {
+                // Generate randomness for the construction of the resource
+                let mut rand_seed = [0u8; DIGEST_BYTES];
+                rng.fill(&mut rand_seed);
+                let mut nonce = [0u8; DIGEST_BYTES];
+                rng.fill(&mut nonce);
+                // Generate a nullifier key
+                let nullifier_key = NullifierKey::random(&mut rng);
+                // Calculate ephemeral value reference
+                let value_ref = keccak256(addr.as_slice());
+                // The permanent resource
+                let resource = Resource {
+                    value_ref: value_ref.0,
+                    is_ephemeral: true,
+                    rand_seed,
+                    nonce,
+                    quantity: amount.into(),
+                    logic_ref,
+                    label_ref: label_ref.0,
+                    nk_commitment: nullifier_key.commit().0,
                 };
             }
         },
