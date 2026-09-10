@@ -34,6 +34,16 @@ use nodes::BarretenbergCircuit;
 use alloy::primitives::address;
 use wallet::NullifierKey;
 use alloy::primitives::keccak256;
+use client::TransferAuthWitness;
+use client::ValueInfo;
+use client::LabelInfo;
+use client::ForwarderInfo;
+use client::CALL_TYPE_WRAP;
+use client::CALL_TYPE_UNWRAP;
+use client::PermitInfo;
+use noirc_abi::InputMap;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use client::MAX_ETH_ADDR_LEN;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -344,11 +354,12 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // Initialize the Barretenberg API
             let mut api = BarretenbergApi::new(backend);
             // Load up the aggregation circuit from disk
-            let circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+            let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
             // The resource logic reference is the UltraHonk verification key hash
             let logic_ref = circuit
                 .compute_vk_response
                 .hash
+                .clone()
                 .try_into()
                 .expect("verification key hash has incorrect length");
             // Obtain the key to authorize the transaction
@@ -365,6 +376,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
             label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
             let label_ref = keccak256(label_ref_bytes);
+            // The label info
+            let label_info = LabelInfo {
+                forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+                erc20_token_addr: erc20_token_addr.into_array(),
+            };
             // Add transaction inputs
             if store.spending_keys.contains_key(&from) {
                 // Obtain the key to authorize the transaction
@@ -380,10 +396,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 // Generate a nullifier key
                 let nullifier_key = NullifierKey::random(&mut rng);
                 // Calculate ephemeral value reference
-                let value_ref = keccak256(addr.as_slice());
+                let mut value_ref = [0u8; 32];
+                value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
                 // The ephemeral resource
                 let resource = Resource {
-                    value_ref: value_ref.0,
+                    value_ref,
                     is_ephemeral: true,
                     rand_seed,
                     nonce,
@@ -392,6 +409,41 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     label_ref: label_ref.0,
                     nk_commitment: nullifier_key.commit().0,
                 };
+                // The permit info
+                let permit_info = PermitInfo {
+                    permit_nonce: [0u8; _],
+                    permit_deadline: [0u8; _],
+                    permit_sig: [0u8; _],
+                };
+                // The forwarder info
+                let forwarder_info = ForwarderInfo {
+                    call_type: CALL_TYPE_WRAP,
+                    ethereum_account_addr: addr.into_array(),
+                    permit: Some(permit_info),
+                };
+                // The action root
+                let action_root = [0u8; DIGEST_BYTES];
+                // The transfer authorization witness
+                let witness = TransferAuthWitness {
+                    resource,
+                    is_consumed: true,
+                    action_root,
+                    nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+                    value_info: None,
+                    resource_ciphertext: None,
+                    resource_ciphertext_len: 0,
+                    discovery_ciphertext: None,
+                    discovery_ciphertext_len: 0,
+                    label_info: Some(label_info),
+                    auth_sig: None,
+                    forwarder_info: Some(forwarder_info),
+                };
+                let mut input_map = InputMap::new();
+                input_map.insert("witness".to_string(), witness.into());
+                // Compute the proof from the witness bytes
+                let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                println!("Verification response: {:?}", verify_response);
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
@@ -400,10 +452,17 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 rng.fill(&mut rand_seed);
                 let mut nonce = [0u8; DIGEST_BYTES];
                 rng.fill(&mut nonce);
+                // The value info
+                let mut value_info = ValueInfo {
+                    auth_pk: [0u8; _],
+                    encryption_pk: [0u8; _],
+                };
+                value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
+                value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
                 // Calculate persistent value reference
                 let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
-                value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&payment_addr.verifying_key.to_sec1_bytes());
-                value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&payment_addr.public_key.to_sec1_bytes());
+                value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
+                value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
                 let value_ref = keccak256(value_ref_bytes);
                 // The permanent resource
                 let resource = Resource {
@@ -416,6 +475,29 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     label_ref: label_ref.0,
                     nk_commitment: payment_addr.nullifier_key_commitment.0,
                 };
+                // The action root
+                let action_root = [0u8; DIGEST_BYTES];
+                // The transfer authorization witness
+                let witness = TransferAuthWitness {
+                    resource,
+                    is_consumed: false,
+                    action_root,
+                    nullifier_key: None,
+                    value_info: Some(value_info),
+                    resource_ciphertext: Some([0u8; _]),
+                    resource_ciphertext_len: 0,
+                    discovery_ciphertext: Some([0u8; _]),
+                    discovery_ciphertext_len: 0,
+                    label_info: Some(label_info),
+                    auth_sig: None,
+                    forwarder_info: None,
+                };
+                let mut input_map = InputMap::new();
+                input_map.insert("witness".to_string(), witness.into());
+                // Compute the proof from the witness bytes
+                let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                println!("Verification response: {:?}", verify_response);
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // Generate randomness for the construction of the resource
                 let mut rand_seed = [0u8; DIGEST_BYTES];
@@ -425,10 +507,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 // Generate a nullifier key
                 let nullifier_key = NullifierKey::random(&mut rng);
                 // Calculate ephemeral value reference
-                let value_ref = keccak256(addr.as_slice());
+                let mut value_ref = [0u8; 32];
+                value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
                 // The permanent resource
                 let resource = Resource {
-                    value_ref: value_ref.0,
+                    value_ref,
                     is_ephemeral: true,
                     rand_seed,
                     nonce,
@@ -437,6 +520,35 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     label_ref: label_ref.0,
                     nk_commitment: nullifier_key.commit().0,
                 };
+                // The forwarder info
+                let forwarder_info = ForwarderInfo {
+                    call_type: CALL_TYPE_UNWRAP,
+                    ethereum_account_addr: addr.into_array(),
+                    permit: None,
+                };
+                // The action root
+                let action_root = [0u8; DIGEST_BYTES];
+                // The transfer authorization witness
+                let witness = TransferAuthWitness {
+                    resource,
+                    is_consumed: false,
+                    action_root,
+                    nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+                    value_info: None,
+                    resource_ciphertext: None,
+                    resource_ciphertext_len: 0,
+                    discovery_ciphertext: None,
+                    discovery_ciphertext_len: 0,
+                    label_info: Some(label_info),
+                    auth_sig: None,
+                    forwarder_info: Some(forwarder_info),
+                };
+                let mut input_map = InputMap::new();
+                input_map.insert("witness".to_string(), witness.into());
+                // Compute the proof from the witness bytes
+                let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                println!("Verification response: {:?}", verify_response);
             }
         },
         ClientCommands::Approve { rpc, spender, signer, token } => {},

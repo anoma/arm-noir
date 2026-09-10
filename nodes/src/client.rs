@@ -2,6 +2,8 @@ use noirc_abi::InputMap;
 use noirc_abi::input_parser::InputValue;
 use acir::FieldElement;
 use serde::{Deserialize, Serialize};
+use nodes::write_bytes;
+use alloy::primitives::U256;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -14,7 +16,7 @@ pub const DIGEST_BYTES: usize = 32;
 // Constants for bounding unbounded loops and variable-length arrays
 const MAX_FORWARDER_ADDR_LEN: usize = 20;
 const MAX_ERC20_TOKEN_ADDR_LEN: usize = 20;
-const MAX_ETH_ADDR_LEN: usize = 20;
+pub const MAX_ETH_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
 const MAX_ENCRYPTION_PK_LEN: usize = 65;
 const MAX_AUTH_SIG_LEN: usize = 64;
@@ -23,14 +25,14 @@ const MAX_DISCOVERY_CIPHERTEXT_LEN: usize = 340;
 const MAX_PERMIT_NONCE_LEN: usize = 32;
 const MAX_PERMIT_DEADLINE_LEN: usize = 32;
 const MAX_PERMIT_SIG_LEN: usize = 65;
-const MAX_INPUT_LEN: u32 = 256;
+const MAX_INPUT_LEN: usize = 256;
 const MAX_OUTPUT_LEN: u32 = 64;
 const MAX_FORWARDER_CALLDATA_LEN: u32 = 340;
 const MAX_BLOBS_PER_PAYLOAD: u32 = 1;
 const MAX_BLOB_LEN: u32 = 340;
 const MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1461;
-const CALL_TYPE_WRAP: u8 = 0;
-const CALL_TYPE_UNWRAP: u8 = 1;
+pub const CALL_TYPE_WRAP: u8 = 0;
+pub const CALL_TYPE_UNWRAP: u8 = 1;
 const PRF_EXPAND_PERSONALIZATION_LEN: u32 = 16;
 const MAX_CREATED: usize = 4;
 const MAX_CONSUMED: usize = 4;
@@ -39,6 +41,7 @@ const MAX_TREE_DEPTH: usize = 32; // Set this to your actual max commitment tree
 const CONSUMED_COUNT_BYTES: u32 = 4;
 const CREATED_COUNT_BYTES: u32 = 4;
 const BASE_FIELD_BYTES: u32 = 32;
+const QUANTITY_BYTES: usize = 16;
 //const MAX_COMPLIANCE_DIGEST_BUF_LEN: u32 = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 
 /// Construct input value from Option type
@@ -125,9 +128,9 @@ impl From<NullifierKey> for InputValue {
 /// ValueInfo holds information about value plaintext
 pub struct ValueInfo {
     /// The authorization verifying key corresponds to the resource.value.owner
-    auth_pk: [u8; MAX_AUTH_PK_LEN],
+    pub auth_pk: [u8; MAX_AUTH_PK_LEN],
     /// Public key. Obtain from the receiver for persistent resource_ciphertext
-    encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
+    pub encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
 }
 
 impl Default for ValueInfo {
@@ -150,12 +153,12 @@ impl From<ValueInfo> for InputValue {
 }
 
 /// LabelInfo holds information about label plaintext.
-#[derive(Default)]
-struct LabelInfo {
+#[derive(Default, Copy, Clone)]
+pub struct LabelInfo {
     /// Address of the forwarder contract for this resource.
-    forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
+    pub forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
     /// Address of the wrapped token within this resource (e.g. USDC).
-    erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
+    pub erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
 }
 
 impl From<LabelInfo> for InputValue {
@@ -170,13 +173,13 @@ impl From<LabelInfo> for InputValue {
 
 /// The PermitInfo contains information about the permit2 signature that is used to generate
 /// logic proofs over resources.
-struct PermitInfo {
+pub struct PermitInfo {
     /// Nonce of the permit2 signature.
-    permit_nonce: [u8; MAX_PERMIT_NONCE_LEN],
+    pub permit_nonce: [u8; MAX_PERMIT_NONCE_LEN],
     /// Deadline of the permit2 signature (i.e., when does it expire)
-    permit_deadline: [u8; MAX_PERMIT_DEADLINE_LEN],
+    pub permit_deadline: [u8; MAX_PERMIT_DEADLINE_LEN],
     /// Signature
-    permit_sig: [u8; MAX_PERMIT_SIG_LEN],
+    pub permit_sig: [u8; MAX_PERMIT_SIG_LEN],
 }
 
 impl Default for PermitInfo {
@@ -202,13 +205,13 @@ impl From<PermitInfo> for InputValue {
 
 /// ForwarderInfo holds information about the forwarder contract being used by a transaction.
 #[derive(Default)]
-struct ForwarderInfo {
+pub struct ForwarderInfo {
     /// Wrapping/Unwrapping of a resource (i.e., mint/burn).
-    call_type: u8,
+    pub call_type: u8,
     /// Address of the ethereum account
-    ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
+    pub ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
     /// PermitInfo (see struct)
-    permit: Option<PermitInfo>,
+    pub permit: Option<PermitInfo>,
 }
 
 impl From<ForwarderInfo> for InputValue {
@@ -224,29 +227,29 @@ impl From<ForwarderInfo> for InputValue {
 
 /// The TokenTransferWitness holds all the information necessary to generate a proof of the
 /// resource logic of a given resource.
-struct TransferAuthWitness {
+pub struct TransferAuthWitness {
     /// Resource this witness is about.
-    resource: Resource,
+    pub resource: Resource,
     /// Is this a consumed or created resource.
-    is_consumed: bool,
+    pub is_consumed: bool,
     /// Action tree root
-    action_root: [u8; DIGEST_BYTES],
+    pub action_root: [u8; DIGEST_BYTES],
     /// Nullifier key for the resource.
-    nullifier_key: Option<NullifierKey>,
+    pub nullifier_key: Option<NullifierKey>,
     /// See ValueInfo struct.
-    value_info: Option<ValueInfo>,
+    pub value_info: Option<ValueInfo>,
     /// A consumed persistent resource requires an authorization signature
-    auth_sig: Option<[u8; MAX_AUTH_SIG_LEN]>,
+    pub auth_sig: Option<[u8; MAX_AUTH_SIG_LEN]>,
     /// See EncryptionInfo struct.
-    resource_ciphertext: Option<[u8; MAX_RESOURCE_CIPHERTEXT_LEN]>,
-    resource_ciphertext_len: u32,
+    pub resource_ciphertext: Option<[u8; MAX_RESOURCE_CIPHERTEXT_LEN]>,
+    pub resource_ciphertext_len: u32,
     /// The discovery ciphertext for the resource
-    discovery_ciphertext: Option<[u8; MAX_DISCOVERY_CIPHERTEXT_LEN]>,
-    discovery_ciphertext_len: u32,
+    pub discovery_ciphertext: Option<[u8; MAX_DISCOVERY_CIPHERTEXT_LEN]>,
+    pub discovery_ciphertext_len: u32,
     /// See LabelInfo struct.
-    label_info: Option<LabelInfo>,
+    pub label_info: Option<LabelInfo>,
     /// See ForwarderInfo struct.
-    forwarder_info: Option<ForwarderInfo>,
+    pub forwarder_info: Option<ForwarderInfo>,
 }
 
 impl From<TransferAuthWitness> for InputValue {

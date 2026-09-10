@@ -206,3 +206,19 @@ impl BarretenbergCircuit {
         )
     }
 }
+
+/// Write the given bytes into the given buffer at the given offset
+pub fn write_bytes(dest: &mut [u8], offset: &mut usize, src: &[u8]) {
+    let next_offset = *offset + src.len();
+    dest[*offset..next_offset].copy_from_slice(src);
+    *offset = next_offset;
+}
+
+/// Read bytes from the given buffer at the given offset
+pub fn read_bytes<const N: usize>(src: &[u8], offset: &mut usize) -> [u8; N] {
+    let mut dest = [0u8; N];
+    let next_offset = *offset + N;
+    dest.copy_from_slice(&src[*offset..next_offset]);
+    *offset = next_offset;
+    dest
+}

@@ -24,6 +24,8 @@ use k256::SecretKey;
 use k256::schnorr::CryptoRngCore;
 use alloy::primitives::keccak256;
 use rand::Rng;
+use nodes::write_bytes;
+use nodes::read_bytes;
 
 // Ethereum block height
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -73,20 +75,6 @@ impl NullifierKey {
     pub fn commit(self) -> NullifierKeyCommitment {
         NullifierKeyCommitment(keccak256(self.0).0)
     }
-}
-
-fn write_bytes(dest: &mut [u8], offset: &mut usize, src: &[u8]) {
-    let next_offset = *offset + src.len();
-    dest[*offset..next_offset].copy_from_slice(src);
-    *offset = next_offset;
-}
-
-fn read_bytes<const N: usize>(src: &[u8], offset: &mut usize) -> [u8; N] {
-    let mut dest = [0u8; N];
-    let next_offset = *offset + N;
-    dest.copy_from_slice(&src[*offset..next_offset]);
-    *offset = next_offset;
-    dest
 }
 
 #[derive(Clone, Copy, Debug)]

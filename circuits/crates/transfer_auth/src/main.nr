@@ -225,7 +225,6 @@ fn value_ref_from_eth_addr(ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN]) -> [u8
     value_ref
 }
 
-// Mock ABI encoding functions. In a real implementation, these would perform actual ABI encoding.
 fn encode_wrap_forwarder_input(
     erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
     quantity: u128,
