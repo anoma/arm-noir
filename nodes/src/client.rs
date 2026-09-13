@@ -4,11 +4,23 @@ use acir::FieldElement;
 use serde::{Deserialize, Serialize};
 use nodes::write_bytes;
 use alloy::primitives::U256;
+use rand::Rng;
+use ark_bn254::Fq;
+use ark_ff::UniformRand;
+use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::One;
+use ark_ff::Zero;
+use acir::AcirField;
+use ark_ff::BigInteger;
+use ark_ff::BigInt;
+use alloy::primitives::keccak256;
+use sha2::{Sha256, Digest};
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
 // You may need to define this constant at the top of your file alongside TRANSFER_AUTH_CIRCUIT_PATH
-const COMPLIANCE_CIRCUIT_PATH: &str = "../circuits/target/compliance.json";
+pub const COMPLIANCE_CIRCUIT_PATH: &str = "../circuits/target/compliance.json";
 // You may need to define this constant at the top of your file alongside DELTA_VERIFY_CIRCUIT_PATH
 const DELTA_VERIFY_CIRCUIT_PATH: &str = "../circuits/target/delta_verify.json";
 
@@ -33,15 +45,25 @@ const MAX_BLOB_LEN: u32 = 340;
 const MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1461;
 pub const CALL_TYPE_WRAP: u8 = 0;
 pub const CALL_TYPE_UNWRAP: u8 = 1;
-const PRF_EXPAND_PERSONALIZATION_LEN: u32 = 16;
-const MAX_CREATED: usize = 4;
-const MAX_CONSUMED: usize = 4;
+const PRF_EXPAND_PERSONALIZATION_LEN: usize = 16;
+pub const MAX_CREATED: usize = 4;
+pub const MAX_CONSUMED: usize = 4;
 const MAX_KINDS: u32 = 8;
-const MAX_TREE_DEPTH: usize = 32; // Set this to your actual max commitment tree depth
+pub const MAX_TREE_DEPTH: usize = 32; // Set this to your actual max commitment tree depth
 const CONSUMED_COUNT_BYTES: u32 = 4;
 const CREATED_COUNT_BYTES: u32 = 4;
 const BASE_FIELD_BYTES: u32 = 32;
 const QUANTITY_BYTES: usize = 16;
+const RESOURCE_BYTES: usize = 6*DIGEST_BYTES + QUANTITY_BYTES + 1;
+const RCM_BYTES: usize = PRF_EXPAND_PERSONALIZATION_LEN + 1 + 2 * DIGEST_BYTES;
+const PRF_EXPAND_RCM: u8 = 1;
+const PRF_EXPAND_PERSONALIZATION: [u8; PRF_EXPAND_PERSONALIZATION_LEN] = *b"RISC0_ExpandSeed";
+const PSI_BYTES: usize = PRF_EXPAND_PERSONALIZATION_LEN + 1 + 2 * DIGEST_BYTES;
+const PRF_EXPAND_PSI: u8 = 0;
+const NONCE_DERIVATION_PERSONALIZATION_LEN: usize = 20;
+const NONCE_DERIVATION_PERSONALIZATION: [u8; NONCE_DERIVATION_PERSONALIZATION_LEN] = *b"ARM_NONCE_DERIVATION";
+const NONCE_INDEX_BYTES: usize = 4;
+const NONCE_PREIMAGE_LEN: usize = NONCE_DERIVATION_PERSONALIZATION_LEN + NONCE_INDEX_BYTES + DIGEST_BYTES;
 //const MAX_COMPLIANCE_DIGEST_BUF_LEN: u32 = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 
 /// Construct input value from Option type
@@ -74,7 +96,7 @@ impl<const N: usize> Default for Array<N> {
 }
 
 /// ARM Resource
-#[derive(Deserialize, Serialize, Clone, Copy)]
+#[derive(Deserialize, Serialize, Clone, Copy, Default)]
 pub struct Resource {
     /// a succinct representation of the predicate associated with the resource
     pub logic_ref: [u8; DIGEST_BYTES],
@@ -107,6 +129,125 @@ impl From<Resource> for InputValue {
         map.insert("is_ephemeral".to_string(), InputValue::Field(FieldElement::from(res.is_ephemeral)));
         map.insert("quantity".to_string(), InputValue::Field(FieldElement::from(res.quantity)));
         InputValue::Struct(map)
+    }
+}
+
+impl Resource {
+    /// Compute the inner psi for the resource
+    pub fn psi(self) -> [u8; DIGEST_BYTES] {
+        let mut bytes = [0u8; PSI_BYTES];
+        let mut offset: usize = 0;
+        // Write the PRF_EXPAND_PERSONALIZATION
+        write_bytes(&mut bytes, &mut offset, &PRF_EXPAND_PERSONALIZATION);
+        // Write the PRF_EXPAND_PSI
+        write_bytes(&mut bytes, &mut offset, &[PRF_EXPAND_PSI]);
+        // Write the random seed
+        write_bytes(&mut bytes, &mut offset, &self.rand_seed);
+        // Write the nonce
+        write_bytes(&mut bytes, &mut offset, &self.nonce);
+        assert_eq!(offset, PSI_BYTES, "resource psi pre-image malformed");
+        keccak256(bytes).0
+    }
+    
+    /// Compute the randomness to commit the resource
+    pub fn rcm(self) -> [u8; DIGEST_BYTES]  {
+        let mut bytes = [0u8; RCM_BYTES];
+        let mut offset: usize = 0;
+        // Write the PRF_EXPAND_PERSONALIZATION
+        write_bytes(&mut bytes, &mut offset, &PRF_EXPAND_PERSONALIZATION);
+        // Write the PRF_EXPAND_RCM
+        write_bytes(&mut bytes, &mut offset, &[PRF_EXPAND_RCM]);
+        // Write the random seed
+        write_bytes(&mut bytes, &mut offset, &self.rand_seed);
+        // Write the nonce
+        write_bytes(&mut bytes, &mut offset, &self.nonce);
+        assert_eq!(offset, RCM_BYTES, "resource rcm pre-image malformed");
+        keccak256(bytes).0
+    }
+    
+    fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
+        // Concatenate all the components of this resource
+        let mut bytes = [0; RESOURCE_BYTES];
+        let mut offset: usize = 0;
+        // Write the image ID bytes
+        write_bytes(&mut bytes, &mut offset, &self.logic_ref);
+        // Write the label_ref bytes
+        write_bytes(&mut bytes, &mut offset, &self.label_ref);
+        // Write the fungible value_ref bytes
+        write_bytes(&mut bytes, &mut offset, &self.value_ref);
+        // Write the quantity bytes
+        let q_bytes = self.quantity.to_be_bytes();
+        write_bytes(&mut bytes, &mut offset, &q_bytes);
+        // Write the nonce bytes
+        write_bytes(&mut bytes, &mut offset, &self.nonce);
+        // Write the nullifier public key bytes
+        write_bytes(&mut bytes, &mut offset, &self.nk_commitment);
+        // Write the randomness seed bytes
+        let rcm = self.rcm();
+        write_bytes(&mut bytes, &mut offset, &rcm);
+        // Write the ephemeral flag
+        write_bytes(&mut bytes, &mut offset, &[self.is_ephemeral as u8]);
+        assert_eq!(offset, RESOURCE_BYTES, "resource commitment pre-image malformed");
+        bytes
+    }
+
+    /// Compute the commitment to the resource
+    pub fn commitment(self) -> [u8; DIGEST_BYTES] {
+        // Now produce the hash
+        keccak256(self.to_bytes()).0
+    }
+
+    /// Compute the nullifier of the resource
+    pub fn nullifier(&self, nf_key: NullifierKey) -> [u8; DIGEST_BYTES] {
+        let cm = self.commitment();
+        self.nullifier_from_commitment(nf_key, cm)
+    }
+
+    /// Compute the nullifier of the resource from its commitment
+    pub fn nullifier_from_commitment(self, nk: NullifierKey, cm: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
+        // Make sure that the nullifier public key corresponds to the secret key
+        assert_eq!(self.nk_commitment, crate::wallet::NullifierKey(nk.bytes).commit().0);
+        let mut bytes = [0u8; 4 * DIGEST_BYTES];
+        let mut offset: usize = 0;
+        // Write the resource commitment
+        write_bytes(&mut bytes, &mut offset, &cm);
+        // Write the nullifier secret key
+        write_bytes(&mut bytes, &mut offset, &nk.bytes);
+        // Write the nonce
+        write_bytes(&mut bytes, &mut offset, &self.nonce);
+        // Write psi
+        let psi = self.psi();
+        write_bytes(&mut bytes, &mut offset, &psi);
+        assert_eq!(offset, 4 * DIGEST_BYTES, "nullifier pre-image malformed");
+        keccak256(bytes).0
+    }
+
+    /// Derives the nonce by hashing
+    /// `ARM_NONCE_DERIVATION || index_be || nullifiers_digest`.
+    pub fn derive_nonce(index: u32, nullifiers_digest: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
+        let mut bytes = [0u8; NONCE_PREIMAGE_LEN];
+        let mut offset: usize = 0;
+        write_bytes(&mut bytes, &mut offset, &NONCE_DERIVATION_PERSONALIZATION);
+        write_bytes(&mut bytes, &mut offset, &index.to_be_bytes());
+        write_bytes(&mut bytes, &mut offset, &nullifiers_digest);
+        assert_eq!(offset, NONCE_PREIMAGE_LEN, "nonce pre-image malformed");
+        Sha256::digest(&bytes[..]).into()
+    }
+
+    /// Hashes the concatenation of the passed nullifier digests.
+    /// Fails if `nullifiers` is empty.
+    pub fn hash_nullifiers(nullifiers: [[u8; DIGEST_BYTES]; MAX_CONSUMED], count: usize) -> [u8; DIGEST_BYTES] {
+        assert!(count > 0);
+        assert!(count <= MAX_CONSUMED);
+        let mut hash_input = [0u8; MAX_CONSUMED * DIGEST_BYTES];
+        let mut offset: usize = 0;
+        for i in 0..MAX_CONSUMED {
+            if i < count {
+                write_bytes(&mut hash_input, &mut offset, &nullifiers[i]);
+            }
+        }
+        assert_eq!(offset, count * DIGEST_BYTES, "nullifier concatenation malformed");
+        Sha256::digest(&hash_input[..offset]).into()
     }
 }
 
@@ -273,10 +414,10 @@ impl From<TransferAuthWitness> for InputValue {
 }
 
 /// A path from a position in a particular commitment tree to the root of that tree.
-#[derive(Clone, Copy)]
-struct MerklePath {
-    path: [(FieldElement, bool); MAX_TREE_DEPTH],
-    depth: u32, // Logical length of the path (since the array is statically sized)
+#[derive(Clone, Copy, Default)]
+pub struct MerklePath {
+    pub path: [(FieldElement, bool); MAX_TREE_DEPTH],
+    pub depth: u32, // Logical length of the path (since the array is statically sized)
 }
 
 impl From<MerklePath> for InputValue {
@@ -295,14 +436,14 @@ impl From<MerklePath> for InputValue {
 }
 
 /// Private information related to a consumed resource.
-#[derive(Clone, Copy)]
-struct ConsumedResourceWitness {
+#[derive(Clone, Copy, Default)]
+pub struct ConsumedResourceWitness {
     /// The consumed resource.
-    resource: Resource,
+    pub resource: Resource,
     /// The path from the consumed commitment to the root of the commitment tree.
-    cm_merkle_path: MerklePath,
+    pub cm_merkle_path: MerklePath,
     /// Nullifier key of the consumed resource.
-    nf_key: NullifierKey,
+    pub nf_key: NullifierKey,
 }
 
 impl From<ConsumedResourceWitness> for InputValue {
@@ -416,18 +557,35 @@ impl From<EmbeddedCurveScalar> for InputValue {
     }
 }
 
+impl EmbeddedCurveScalar {
+    /// Generate a nullifier key
+    pub fn random(rng: &mut impl Rng) -> Self {
+        // Generate the random field element
+        let random_fq = Fq::rand(rng);
+        let random_bigint = random_fq.into_bigint();
+        // hi: Shift right by 128 to get the top 128 bits
+        let hi = random_bigint >> 128;
+        // lo: Shift left by 128, then right by 128 to mask out the top 128 bits
+        let lo = (random_bigint << 128) >> 128;
+        EmbeddedCurveScalar {
+            hi: FieldElement::from_repr(hi.into()),
+            lo: FieldElement::from_repr(lo.into()),
+        }
+    }
+}
+
 /// The compliance witness contains all private inputs to the compliance proof.
-struct ComplianceWitness {
+pub struct ComplianceWitness {
     /// Private information of consumed resources
-    consumed_data: [ConsumedResourceWitness; MAX_CONSUMED],
-    consumed_count: u32,
+    pub consumed_data: [ConsumedResourceWitness; MAX_CONSUMED],
+    pub consumed_count: u32,
     /// Private information of created resources
-    created_resources: [Resource; MAX_CREATED],
-    created_count: u32,
+    pub created_resources: [Resource; MAX_CREATED],
+    pub created_count: u32,
     /// The existing root for ephemeral resources
-    ephemeral_root: [u8; DIGEST_BYTES],
+    pub ephemeral_root: [u8; DIGEST_BYTES],
     /// Bytes of randomness for the delta commitment `rcv`
-    rcv: EmbeddedCurveScalar, // Scalar parsed to field
+    pub rcv: EmbeddedCurveScalar, // Scalar parsed to field
 }
 
 impl From<ComplianceWitness> for InputValue {

@@ -44,6 +44,16 @@ use client::PermitInfo;
 use noirc_abi::InputMap;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use client::MAX_ETH_ADDR_LEN;
+use client::ConsumedResourceWitness;
+use client::MerklePath;
+use acir::FieldElement;
+use acir::AcirField;
+use client::MAX_TREE_DEPTH;
+use client::MAX_CONSUMED;
+use client::MAX_CREATED;
+use client::ComplianceWitness;
+use client::EmbeddedCurveScalar;
+use client::COMPLIANCE_CIRCUIT_PATH;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -348,15 +358,15 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     match cli {
         ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
             // Load up the aggregation circuit from disk
-            let program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+            let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
             // Use the FFI backend which links directly to static libraries
             let backend = FfiBackend::new().unwrap();
             // Initialize the Barretenberg API
             let mut api = BarretenbergApi::new(backend);
             // Load up the aggregation circuit from disk
-            let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
+            let mut logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
             // The resource logic reference is the UltraHonk verification key hash
-            let logic_ref = circuit
+            let logic_ref = logic_circuit
                 .compute_vk_response
                 .hash
                 .clone()
@@ -381,6 +391,14 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
                 erc20_token_addr: erc20_token_addr.into_array(),
             };
+            // The consumed nullifiers
+            let mut consumed_nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
+            // The consumed data
+            let mut consumed_data = [ConsumedResourceWitness::default(); MAX_CONSUMED];
+            let mut consumed_count = 0u8;
+            // The created data
+            let mut created_resources = [Resource::default(); MAX_CREATED];
+            let mut created_count = 0u8;
             // Add transaction inputs
             if store.spending_keys.contains_key(&from) {
                 // Obtain the key to authorize the transaction
@@ -424,7 +442,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 // The action root
                 let action_root = [0u8; DIGEST_BYTES];
                 // The transfer authorization witness
-                let witness = TransferAuthWitness {
+                let logic_witness = TransferAuthWitness {
                     resource,
                     is_consumed: true,
                     action_root,
@@ -439,19 +457,35 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     forwarder_info: Some(forwarder_info),
                 };
                 let mut input_map = InputMap::new();
-                input_map.insert("witness".to_string(), witness.into());
+                input_map.insert("witness".to_string(), logic_witness.into());
                 // Compute the proof from the witness bytes
-                let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-                let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Verification response: {:?}", verify_response);
+                // Compliance witness
+                let compliance_witness = ConsumedResourceWitness {
+                    resource,
+                    nf_key: client::NullifierKey { bytes: nullifier_key.0 },
+                    cm_merkle_path: MerklePath {
+                        path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+                        depth: MAX_TREE_DEPTH as u32,
+                    },
+                };
+                consumed_data[usize::from(consumed_count)] = compliance_witness;
+                let resource_commitment = compliance_witness.resource.commitment();
+                let resource_nullifier = compliance_witness.
+                    resource
+                    .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+                consumed_nullifiers[usize::from(consumed_count)] = resource_nullifier;
+                consumed_count += 1;
             }
+            // Compute the digest of the consumed nullifiers
+            let consumed_nullifiers_digest = Resource::hash_nullifiers(consumed_nullifiers, consumed_count.into());
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
                 // Generate randomness for the construction of the resource
                 let mut rand_seed = [0u8; DIGEST_BYTES];
                 rng.fill(&mut rand_seed);
-                let mut nonce = [0u8; DIGEST_BYTES];
-                rng.fill(&mut nonce);
                 // The value info
                 let mut value_info = ValueInfo {
                     auth_pk: [0u8; _],
@@ -464,6 +498,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
                 value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
                 let value_ref = keccak256(value_ref_bytes);
+                // Derive the nonce
+                let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
                 // The permanent resource
                 let resource = Resource {
                     value_ref: value_ref.0,
@@ -495,20 +531,23 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
                 // Compute the proof from the witness bytes
-                let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-                let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Verification response: {:?}", verify_response);
+                // Compliance witness
+                created_resources[usize::from(created_count)] = resource;
+                created_count += 1;
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // Generate randomness for the construction of the resource
                 let mut rand_seed = [0u8; DIGEST_BYTES];
                 rng.fill(&mut rand_seed);
-                let mut nonce = [0u8; DIGEST_BYTES];
-                rng.fill(&mut nonce);
                 // Generate a nullifier key
                 let nullifier_key = NullifierKey::random(&mut rng);
                 // Calculate ephemeral value reference
                 let mut value_ref = [0u8; 32];
                 value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
+                // Derive the nonce
+                let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
                 // The permanent resource
                 let resource = Resource {
                     value_ref,
@@ -546,10 +585,32 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
                 // Compute the proof from the witness bytes
-                let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-                let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Verification response: {:?}", verify_response);
+                // Compliance witness
+                created_resources[usize::from(created_count)] = resource;
+                created_count += 1;
             }
+            // Construct the compliance witness
+            let compliance_witness = ComplianceWitness {
+                consumed_data,
+                consumed_count: consumed_count.into(),
+                created_resources,
+                created_count: created_count.into(),
+                ephemeral_root: [0u8; _],
+                rcv: EmbeddedCurveScalar::random(&mut rng),
+            };
+            // Load up the aggregation circuit from disk
+            let compliance_program_artifact_path = PathBuf::from(COMPLIANCE_CIRCUIT_PATH);
+            // Load up the aggregation circuit from disk
+            let mut compliance_circuit = BarretenbergCircuit::new(&mut api, compliance_program_artifact_path);
+            let mut input_map = InputMap::new();
+            input_map.insert("witness".to_string(), compliance_witness.into());
+            // Compute the proof from the witness bytes
+            let prove_response = compliance_circuit.circuit_prove(&mut api, input_map).unwrap();
+            let verify_response = compliance_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+            println!("Verification response: {:?}", verify_response);
         },
         ClientCommands::Approve { rpc, spender, signer, token } => {},
     }
