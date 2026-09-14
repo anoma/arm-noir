@@ -54,6 +54,9 @@ use client::MAX_CREATED;
 use client::ComplianceWitness;
 use client::EmbeddedCurveScalar;
 use client::COMPLIANCE_CIRCUIT_PATH;
+use std::collections::BTreeSet;
+use client::Nullifier;
+use borsh::{BorshSerialize, BorshDeserialize};
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -349,9 +352,35 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+// State of the shielded pool
+#[derive(Default, BorshSerialize, BorshDeserialize)]
+struct PoolState {
+    // Map viewing keys to the notes they own
+    pos_map: HashMap<ExtendedFullViewingKey, BTreeSet<u64>>,
+    // Map nullifiers to note positions they nullify
+    nf_map: HashMap<Nullifier, u64>,
+    // Map note position to notes
+    note_map: HashMap<u64, Resource>,
+    // Set of spent note positions
+    spent_notes: BTreeSet<u64>,
+    // The pool's current position
+    current_pos: u64,
+    // Nodes not yet in the tree
+    note_queue: Vec<Resource>,
+    // Nullifiers not yet processed
+    nullifier_queue: Vec<Nullifier>,
+}
+
 // Handle client subcommands
 fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let wallet_path = Path::new("wallet.toml");
+    let state_path = Path::new("state.bin");
+    // The state of the shielded pool
+    let mut state = if let Ok(state_bytes) = std::fs::read(state_path) {
+        PoolState::try_from_slice(&state_bytes)?
+    } else {
+        PoolState::default()
+    };
     // Attempt to load the wallet, or default to empty if it doesn't exist
     let store = Store::load(wallet_path).unwrap_or_default();
     let mut rng = rand::thread_rng();
@@ -611,6 +640,16 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let prove_response = compliance_circuit.circuit_prove(&mut api, input_map).unwrap();
             let verify_response = compliance_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
             println!("Verification response: {:?}", verify_response);
+            // Finally update the state of the pool
+            for i in 0..consumed_count {
+                state.nullifier_queue.push(consumed_nullifiers[usize::from(i)]);
+            }
+            for i in 0..created_count {
+                state.note_queue.push(created_resources[usize::from(i)]);
+            }
+            // Save the updated state
+            let state_bytes = borsh::to_vec(&state)?;
+            std::fs::write(state_path, state_bytes)?;
         },
         ClientCommands::Approve { rpc, spender, signer, token } => {},
     }

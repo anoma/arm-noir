@@ -26,6 +26,10 @@ use alloy::primitives::keccak256;
 use rand::Rng;
 use nodes::write_bytes;
 use nodes::read_bytes;
+use borsh::{BorshSerialize, BorshDeserialize};
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::cmp::Ordering;
 
 // Ethereum block height
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -77,7 +81,7 @@ impl NullifierKey {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, BorshSerialize, BorshDeserialize)]
 pub struct NullifierKeyCommitment(pub [u8; NULLIFIER_KEY_COMMITMENT_LEN]);
 
 #[derive(Clone, Debug)]
@@ -102,28 +106,79 @@ impl Bech32 for ExtendedFullViewingKey {
     const HRP: &str = "zxviewtestsapling";
 
     fn to_vec(&self) -> std::io::Result<Vec<u8>> {
-        let mut bytes = [0u8; VERIFYING_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_COMMITMENT_LEN];
-        let mut offset = 0;
-        write_bytes(&mut bytes, &mut offset, &self.verifying_key.to_sec1_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.secret_key.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment.0);
-        Ok(bytes.to_vec())
+        borsh::to_vec(&self)
     }
 
     fn from_slice(v: &[u8]) -> std::io::Result<Self> {
-        if v.len() != VERIFYING_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_COMMITMENT_LEN {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "unexpected length for ExtendedFullViewingKey",
-            ));
-        }
-        let mut offset = 0;
-        let vk = VerifyingKey::from_sec1_bytes(&read_bytes::<VERIFYING_KEY_LEN>(v, &mut offset))
-            .map_err(std::io::Error::other)?;
-        let sk = SecretKey::from_slice(&read_bytes::<SECRET_KEY_LEN>(v, &mut offset))
-            .map_err(std::io::Error::other)?;
-        let nk_commit = NullifierKeyCommitment(read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset));
-        Ok(Self { verifying_key: vk, secret_key: sk, nullifier_key_commitment: nk_commit })
+        BorshDeserialize::try_from_slice(v)
+    }
+}
+
+impl BorshSerialize for ExtendedFullViewingKey {
+    fn serialize<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        // Serialize VerifyingKey as SEC1 bytes (33 bytes)
+        writer.write_all(&self.verifying_key.to_sec1_bytes())?;
+        // Serialize SecretKey as 32 bytes
+        writer.write_all(&self.secret_key.to_bytes())?;
+        // NullifierKeyCommitment already derives BorshSerialize
+        BorshSerialize::serialize(&self.nullifier_key_commitment, writer)?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for ExtendedFullViewingKey {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        // Read and parse VerifyingKey
+        let mut vk_bytes = [0u8; VERIFYING_KEY_LEN];
+        reader.read_exact(&mut vk_bytes)?;
+        let verifying_key = VerifyingKey::from_sec1_bytes(&vk_bytes)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+
+        // Read and parse SecretKey
+        let mut sk_bytes = [0u8; SECRET_KEY_LEN];
+        reader.read_exact(&mut sk_bytes)?;
+        let secret_key = SecretKey::from_slice(&sk_bytes)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+
+        // Deserialize NullifierKeyCommitment
+        let nullifier_key_commitment = NullifierKeyCommitment::deserialize_reader(reader)?;
+
+        Ok(Self {
+            verifying_key,
+            secret_key,
+            nullifier_key_commitment,
+        })
+    }
+}
+
+impl PartialEq for ExtendedFullViewingKey {
+    fn eq(&self, other: &Self) -> bool {
+        let a = self.to_vec().expect("viewing key should serialize");
+        let b = other.to_vec().expect("viewing key should serialize");
+        a.eq(&b)
+    }
+}
+
+impl Eq for ExtendedFullViewingKey {}
+
+impl Ord for ExtendedFullViewingKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let a = self.to_vec().expect("viewing key should serialize");
+        let b = other.to_vec().expect("viewing key should serialize");
+        a.cmp(&b)
+    }
+}
+
+impl PartialOrd for ExtendedFullViewingKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for ExtendedFullViewingKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let a = self.to_vec().expect("viewing key should serialize");
+        a.hash(state)
     }
 }
 

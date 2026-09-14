@@ -3,19 +3,13 @@ use noirc_abi::input_parser::InputValue;
 use acir::FieldElement;
 use serde::{Deserialize, Serialize};
 use nodes::write_bytes;
-use alloy::primitives::U256;
 use rand::Rng;
 use ark_bn254::Fq;
 use ark_ff::UniformRand;
 use ark_ff::PrimeField;
-use ark_bn254::Fr;
-use ark_ff::One;
-use ark_ff::Zero;
-use acir::AcirField;
-use ark_ff::BigInteger;
-use ark_ff::BigInt;
 use alloy::primitives::keccak256;
 use sha2::{Sha256, Digest};
+use borsh::{BorshSerialize, BorshDeserialize};
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -95,8 +89,10 @@ impl<const N: usize> Default for Array<N> {
     }
 }
 
+pub type Nullifier = [u8; DIGEST_BYTES];
+
 /// ARM Resource
-#[derive(Deserialize, Serialize, Clone, Copy, Default)]
+#[derive(Deserialize, Serialize, Clone, Copy, Default, BorshSerialize, BorshDeserialize)]
 pub struct Resource {
     /// a succinct representation of the predicate associated with the resource
     pub logic_ref: [u8; DIGEST_BYTES],
@@ -204,7 +200,7 @@ impl Resource {
     }
 
     /// Compute the nullifier of the resource from its commitment
-    pub fn nullifier_from_commitment(self, nk: NullifierKey, cm: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
+    pub fn nullifier_from_commitment(self, nk: NullifierKey, cm: [u8; DIGEST_BYTES]) -> Nullifier {
         // Make sure that the nullifier public key corresponds to the secret key
         assert_eq!(self.nk_commitment, crate::wallet::NullifierKey(nk.bytes).commit().0);
         let mut bytes = [0u8; 4 * DIGEST_BYTES];
@@ -236,7 +232,7 @@ impl Resource {
 
     /// Hashes the concatenation of the passed nullifier digests.
     /// Fails if `nullifiers` is empty.
-    pub fn hash_nullifiers(nullifiers: [[u8; DIGEST_BYTES]; MAX_CONSUMED], count: usize) -> [u8; DIGEST_BYTES] {
+    pub fn hash_nullifiers(nullifiers: [Nullifier; MAX_CONSUMED], count: usize) -> [u8; DIGEST_BYTES] {
         assert!(count > 0);
         assert!(count <= MAX_CONSUMED);
         let mut hash_input = [0u8; MAX_CONSUMED * DIGEST_BYTES];
