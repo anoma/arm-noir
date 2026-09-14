@@ -92,7 +92,7 @@ impl<const N: usize> Default for Array<N> {
 pub type Nullifier = [u8; DIGEST_BYTES];
 
 /// ARM Resource
-#[derive(Deserialize, Serialize, Clone, Copy, Default, BorshSerialize, BorshDeserialize)]
+#[derive(Deserialize, Serialize, Clone, Copy, Default, BorshSerialize, BorshDeserialize, Debug)]
 pub struct Resource {
     /// a succinct representation of the predicate associated with the resource
     pub logic_ref: [u8; DIGEST_BYTES],

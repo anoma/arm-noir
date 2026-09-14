@@ -57,6 +57,9 @@ use client::COMPLIANCE_CIRCUIT_PATH;
 use std::collections::BTreeSet;
 use client::Nullifier;
 use borsh::{BorshSerialize, BorshDeserialize};
+use std::collections::BTreeMap;
+use k256::ecdsa::signature::hazmat::PrehashSigner;
+use k256::ecdsa::Signature;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -353,30 +356,317 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
 }
 
 // State of the shielded pool
-#[derive(Default, BorshSerialize, BorshDeserialize)]
+#[derive(Default, BorshSerialize, BorshDeserialize, Clone)]
 struct PoolState {
-    // Map viewing keys to the notes they own
-    pos_map: HashMap<ExtendedFullViewingKey, BTreeSet<u64>>,
-    // Map nullifiers to note positions they nullify
-    nf_map: HashMap<Nullifier, u64>,
-    // Map note position to notes
-    note_map: HashMap<u64, Resource>,
-    // Set of spent note positions
-    spent_notes: BTreeSet<u64>,
-    // The pool's current position
-    current_pos: u64,
     // Nodes not yet in the tree
     note_queue: Vec<Resource>,
     // Nullifiers not yet processed
     nullifier_queue: Vec<Nullifier>,
 }
 
+// The client's view of the shielded pool
+#[derive(Default, BorshSerialize, BorshDeserialize, Debug)]
+struct ClientState {
+    // Map viewing keys to the notes they own
+    pos_map: HashMap<ExtendedFullViewingKey, BTreeSet<u64>>,
+    // Map nullifiers to note positions they nullify
+    nf_map: HashMap<Nullifier, u64>,
+    // Map note position to notes
+    note_map: BTreeMap<u64, Resource>,
+    // Set of spent note positions
+    spent_notes: BTreeSet<u64>,
+    // The pool's current position
+    current_pos: u64,
+}
+
+impl ClientState {
+    fn synchronize(pool: PoolState, fvks: &[ExtendedFullViewingKey]) -> Self {
+        let mut state = Self::default();
+        // Scan the notes in the queue
+        for resource in pool.note_queue {
+            state.note_map.insert(state.current_pos, resource);
+            for fvk in fvks {
+                if resource.nk_commitment == fvk.nullifier_key.commit().0 {
+                    let nullifier_key = client::NullifierKey { bytes: fvk.nullifier_key.0 };
+                    let nullifier = resource.nullifier(nullifier_key);
+                    state.nf_map.insert(nullifier, state.current_pos);
+                    state.pos_map.entry(fvk.clone()).or_default().insert(state.current_pos);
+                    break;
+                }
+            }
+            state.current_pos += 1;
+        }
+        // Scan the nullifier in the queue
+        for nullifier in pool.nullifier_queue {
+            if let Some(pos) = state.nf_map.get(&nullifier) {
+                state.spent_notes.insert(*pos);
+            }
+        }
+        state
+    }
+}
+
+fn add_shielded_input(
+    spending_key: ExtendedSpendingKey,
+    note: Resource,
+) -> (TransferAuthWitness, ConsumedResourceWitness) {
+    // The value info
+    let mut value_info = ValueInfo {
+        auth_pk: [0u8; _],
+        encryption_pk: [0u8; _],
+    };
+    let payment_addr = spending_key.to_viewing_key().to_payment_address();
+    value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
+    value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
+    // The action root
+    let action_root = [0u8; DIGEST_BYTES];
+    // Sign over the resource
+    let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
+    // The transfer authorization witness
+    let logic_witness = TransferAuthWitness {
+        resource: note.clone(),
+        is_consumed: true,
+        action_root,
+        nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
+        value_info: Some(value_info),
+        resource_ciphertext: None,
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: None,
+        discovery_ciphertext_len: 0,
+        label_info: None,
+        auth_sig: Some(auth_sig.to_bytes().into()),
+        forwarder_info: None,
+    };
+    // Compliance witness
+    let compliance_witness = ConsumedResourceWitness {
+        resource: logic_witness.resource,
+        nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
+        cm_merkle_path: MerklePath {
+            path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+            depth: MAX_TREE_DEPTH as u32,
+        },
+    };
+    (logic_witness, compliance_witness)
+}
+
+fn add_transparent_input(
+    rng: &mut impl Rng,
+    logic_ref: [u8; DIGEST_BYTES],
+    addr: Address,
+    erc20_token_addr: Address,
+    amount: u128,
+) -> (TransferAuthWitness, ConsumedResourceWitness) {
+    // Compute the label reference
+    let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+    label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+    label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+    let label_ref = keccak256(label_ref_bytes);
+    // The label info
+    let label_info = LabelInfo {
+        forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+        erc20_token_addr: erc20_token_addr.into_array(),
+    };
+    // Generate randomness for the construction of the resource
+    let mut rand_seed = [0u8; DIGEST_BYTES];
+    rng.fill(&mut rand_seed);
+    let mut nonce = [0u8; DIGEST_BYTES];
+    rng.fill(&mut nonce);
+    // Generate a nullifier key
+    let nullifier_key = NullifierKey::random(rng);
+    // Calculate ephemeral value reference
+    let mut value_ref = [0u8; 32];
+    value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
+    // The ephemeral resource
+    let resource = Resource {
+        value_ref,
+        is_ephemeral: true,
+        rand_seed,
+        nonce,
+        quantity: amount.into(),
+        logic_ref,
+        label_ref: label_ref.0,
+        nk_commitment: nullifier_key.commit().0,
+    };
+    // The permit info
+    let permit_info = PermitInfo {
+        permit_nonce: [0u8; _],
+        permit_deadline: [0u8; _],
+        permit_sig: [0u8; _],
+    };
+    // The forwarder info
+    let forwarder_info = ForwarderInfo {
+        call_type: CALL_TYPE_WRAP,
+        ethereum_account_addr: addr.into_array(),
+        permit: Some(permit_info),
+    };
+    // The action root
+    let action_root = [0u8; DIGEST_BYTES];
+    // The transfer authorization witness
+    let logic_witness = TransferAuthWitness {
+        resource,
+        is_consumed: true,
+        action_root,
+        nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+        value_info: None,
+        resource_ciphertext: None,
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: None,
+        discovery_ciphertext_len: 0,
+        label_info: Some(label_info),
+        auth_sig: None,
+        forwarder_info: Some(forwarder_info),
+    };
+    // Compliance witness
+    let compliance_witness = ConsumedResourceWitness {
+        resource,
+        nf_key: client::NullifierKey { bytes: nullifier_key.0 },
+        cm_merkle_path: MerklePath {
+            path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+            depth: MAX_TREE_DEPTH as u32,
+        },
+    };
+    (logic_witness, compliance_witness)
+}
+
+fn add_shielded_output(
+    rng: &mut impl Rng,
+    logic_ref: [u8; DIGEST_BYTES],
+    payment_addr: &PaymentAddress,
+    erc20_token_addr: Address,
+    amount: u128,
+    consumed_nullifiers_digest: [u8; DIGEST_BYTES],
+    created_count: u8,
+) -> TransferAuthWitness {
+    // Compute the label reference
+    let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+    label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+    label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+    let label_ref = keccak256(label_ref_bytes);
+    // The label info
+    let label_info = LabelInfo {
+        forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+        erc20_token_addr: erc20_token_addr.into_array(),
+    };
+    // Generate randomness for the construction of the resource
+    let mut rand_seed = [0u8; DIGEST_BYTES];
+    rng.fill(&mut rand_seed);
+    // The value info
+    let mut value_info = ValueInfo {
+        auth_pk: [0u8; _],
+        encryption_pk: [0u8; _],
+    };
+    value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
+    value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
+    // Calculate persistent value reference
+    let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
+    value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
+    value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
+    let value_ref = keccak256(value_ref_bytes);
+    // Derive the nonce
+    let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
+    // The permanent resource
+    let resource = Resource {
+        value_ref: value_ref.0,
+        is_ephemeral: false,
+        rand_seed,
+        nonce,
+        quantity: amount.into(),
+        logic_ref,
+        label_ref: label_ref.0,
+        nk_commitment: payment_addr.nullifier_key_commitment.0,
+    };
+    // The action root
+    let action_root = [0u8; DIGEST_BYTES];
+    // The transfer authorization witness
+    let witness = TransferAuthWitness {
+        resource,
+        is_consumed: false,
+        action_root,
+        nullifier_key: None,
+        value_info: Some(value_info),
+        resource_ciphertext: Some([0u8; _]),
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: Some([0u8; _]),
+        discovery_ciphertext_len: 0,
+        label_info: Some(label_info),
+        auth_sig: None,
+        forwarder_info: None,
+    };
+    witness
+}
+
+fn add_transparent_output(
+    rng: &mut impl Rng,
+    logic_ref: [u8; DIGEST_BYTES],
+    addr: &Address,
+    erc20_token_addr: Address,
+    amount: u128,
+    consumed_nullifiers_digest: [u8; DIGEST_BYTES],
+    created_count: u8,
+) -> TransferAuthWitness {
+    // Compute the label reference
+    let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+    label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+    label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+    let label_ref = keccak256(label_ref_bytes);
+    // The label info
+    let label_info = LabelInfo {
+        forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+        erc20_token_addr: erc20_token_addr.into_array(),
+    };
+    // Generate randomness for the construction of the resource
+    let mut rand_seed = [0u8; DIGEST_BYTES];
+    rng.fill(&mut rand_seed);
+    // Generate a nullifier key
+    let nullifier_key = NullifierKey::random(rng);
+    // Calculate ephemeral value reference
+    let mut value_ref = [0u8; 32];
+    value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
+    // Derive the nonce
+    let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
+    // The permanent resource
+    let resource = Resource {
+        value_ref,
+        is_ephemeral: true,
+        rand_seed,
+        nonce,
+        quantity: amount.into(),
+        logic_ref,
+        label_ref: label_ref.0,
+        nk_commitment: nullifier_key.commit().0,
+    };
+    // The forwarder info
+    let forwarder_info = ForwarderInfo {
+        call_type: CALL_TYPE_UNWRAP,
+        ethereum_account_addr: addr.into_array(),
+        permit: None,
+    };
+    // The action root
+    let action_root = [0u8; DIGEST_BYTES];
+    // The transfer authorization witness
+    let witness = TransferAuthWitness {
+        resource,
+        is_consumed: false,
+        action_root,
+        nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+        value_info: None,
+        resource_ciphertext: None,
+        resource_ciphertext_len: 0,
+        discovery_ciphertext: None,
+        discovery_ciphertext_len: 0,
+        label_info: Some(label_info),
+        auth_sig: None,
+        forwarder_info: Some(forwarder_info),
+    };
+    witness
+}
+
 // Handle client subcommands
 fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let wallet_path = Path::new("wallet.toml");
-    let state_path = Path::new("state.bin");
+    let pool_state_path = Path::new("pool_state.bin");
     // The state of the shielded pool
-    let mut state = if let Ok(state_bytes) = std::fs::read(state_path) {
+    let mut pool_state = if let Ok(state_bytes) = std::fs::read(pool_state_path) {
         PoolState::try_from_slice(&state_bytes)?
     } else {
         PoolState::default()
@@ -415,11 +705,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
             label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
             let label_ref = keccak256(label_ref_bytes);
-            // The label info
-            let label_info = LabelInfo {
-                forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-                erc20_token_addr: erc20_token_addr.into_array(),
-            };
             // The consumed nullifiers
             let mut consumed_nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
             // The consumed data
@@ -428,78 +713,59 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // The created data
             let mut created_resources = [Resource::default(); MAX_CREATED];
             let mut created_count = 0u8;
+            // Data about transaction change
+            let mut change = None;
             // Add transaction inputs
             if store.spending_keys.contains_key(&from) {
+                let mut value_acc = 0u128;
                 // Obtain the key to authorize the transaction
                 let passphrase =
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
+                // First synchronize the client state
+                let client_state = ClientState::synchronize(pool_state.clone(), &[spending_key.to_viewing_key()]);
+                let payment_addr = spending_key.to_viewing_key().to_payment_address();
+                if let Some(note_positions) = client_state.pos_map.get(&spending_key.to_viewing_key()) {
+                    for pos in note_positions {
+                        // Only consider notes that have not yet been spent
+                        if client_state.spent_notes.contains(pos) || value_acc >= amount.into() {
+                            continue;
+                        }
+                        // Get the note
+                        let note = client_state.note_map.get(pos).expect("Missing note");
+                        if !(note.logic_ref == logic_ref && note.label_ref == label_ref) {
+                            continue;
+                        }
+                        value_acc += note.quantity;
+                        let (logic_witness, compliance_witness) = add_shielded_input(spending_key.clone(), note.clone());
+                        consumed_data[usize::from(consumed_count)] = compliance_witness;
+                        let resource_commitment = compliance_witness.resource.commitment();
+                        let resource_nullifier = compliance_witness.
+                            resource
+                            .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+                        consumed_nullifiers[usize::from(consumed_count)] = resource_nullifier;
+                        consumed_count += 1;
+                        let mut input_map = InputMap::new();
+                        input_map.insert("witness".to_string(), logic_witness.into());
+                        // Compute the proof from the witness bytes
+                        let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
+                        let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                        println!("Shielded input verification response: {:?}", verify_response);
+                    }
+                }
+                // Send the change back to the sender if there's any
+                assert!(value_acc >= amount.into());
+                if value_acc > amount.into() {
+                    change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
+                }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                // Generate randomness for the construction of the resource
-                let mut rand_seed = [0u8; DIGEST_BYTES];
-                rng.fill(&mut rand_seed);
-                let mut nonce = [0u8; DIGEST_BYTES];
-                rng.fill(&mut nonce);
-                // Generate a nullifier key
-                let nullifier_key = NullifierKey::random(&mut rng);
-                // Calculate ephemeral value reference
-                let mut value_ref = [0u8; 32];
-                value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
-                // The ephemeral resource
-                let resource = Resource {
-                    value_ref,
-                    is_ephemeral: true,
-                    rand_seed,
-                    nonce,
-                    quantity: amount.into(),
+                let (logic_witness, compliance_witness) = add_transparent_input(
+                    &mut rng,
                     logic_ref,
-                    label_ref: label_ref.0,
-                    nk_commitment: nullifier_key.commit().0,
-                };
-                // The permit info
-                let permit_info = PermitInfo {
-                    permit_nonce: [0u8; _],
-                    permit_deadline: [0u8; _],
-                    permit_sig: [0u8; _],
-                };
-                // The forwarder info
-                let forwarder_info = ForwarderInfo {
-                    call_type: CALL_TYPE_WRAP,
-                    ethereum_account_addr: addr.into_array(),
-                    permit: Some(permit_info),
-                };
-                // The action root
-                let action_root = [0u8; DIGEST_BYTES];
-                // The transfer authorization witness
-                let logic_witness = TransferAuthWitness {
-                    resource,
-                    is_consumed: true,
-                    action_root,
-                    nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
-                    value_info: None,
-                    resource_ciphertext: None,
-                    resource_ciphertext_len: 0,
-                    discovery_ciphertext: None,
-                    discovery_ciphertext_len: 0,
-                    label_info: Some(label_info),
-                    auth_sig: None,
-                    forwarder_info: Some(forwarder_info),
-                };
-                let mut input_map = InputMap::new();
-                input_map.insert("witness".to_string(), logic_witness.into());
-                // Compute the proof from the witness bytes
-                let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
-                let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
-                println!("Verification response: {:?}", verify_response);
-                // Compliance witness
-                let compliance_witness = ConsumedResourceWitness {
-                    resource,
-                    nf_key: client::NullifierKey { bytes: nullifier_key.0 },
-                    cm_merkle_path: MerklePath {
-                        path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
-                        depth: MAX_TREE_DEPTH as u32,
-                    },
-                };
+                    addr,
+                    erc20_token_addr,
+                    amount.into(),
+                );
                 consumed_data[usize::from(consumed_count)] = compliance_witness;
                 let resource_commitment = compliance_witness.resource.commitment();
                 let resource_nullifier = compliance_witness.
@@ -507,119 +773,76 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
                 consumed_nullifiers[usize::from(consumed_count)] = resource_nullifier;
                 consumed_count += 1;
+                let mut input_map = InputMap::new();
+                input_map.insert("witness".to_string(), logic_witness.into());
+                // Compute the proof from the witness bytes
+                let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                println!("Transparent input verification response: {:?}", verify_response);
             }
             // Compute the digest of the consumed nullifiers
             let consumed_nullifiers_digest = Resource::hash_nullifiers(consumed_nullifiers, consumed_count.into());
+            // Add change output
+            if let Some((payment_addr, erc20_token_addr, amount)) = change {
+                let witness = add_shielded_output(
+                    &mut rng,
+                    logic_ref,
+                    &payment_addr,
+                    erc20_token_addr,
+                    amount,
+                    consumed_nullifiers_digest,
+                    created_count,
+                );
+                // Compliance witness
+                created_resources[usize::from(created_count)] = witness.resource;
+                created_count += 1;
+                let mut input_map = InputMap::new();
+                input_map.insert("witness".to_string(), witness.into());
+                // Compute the proof from the witness bytes
+                let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
+                let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+                println!("Change proof verification response: {:?}", verify_response);
+            }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                // Generate randomness for the construction of the resource
-                let mut rand_seed = [0u8; DIGEST_BYTES];
-                rng.fill(&mut rand_seed);
-                // The value info
-                let mut value_info = ValueInfo {
-                    auth_pk: [0u8; _],
-                    encryption_pk: [0u8; _],
-                };
-                value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
-                value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
-                // Calculate persistent value reference
-                let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
-                value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
-                value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
-                let value_ref = keccak256(value_ref_bytes);
-                // Derive the nonce
-                let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
-                // The permanent resource
-                let resource = Resource {
-                    value_ref: value_ref.0,
-                    is_ephemeral: false,
-                    rand_seed,
-                    nonce,
-                    quantity: amount.into(),
+                let witness = add_shielded_output(
+                    &mut rng,
                     logic_ref,
-                    label_ref: label_ref.0,
-                    nk_commitment: payment_addr.nullifier_key_commitment.0,
-                };
-                // The action root
-                let action_root = [0u8; DIGEST_BYTES];
-                // The transfer authorization witness
-                let witness = TransferAuthWitness {
-                    resource,
-                    is_consumed: false,
-                    action_root,
-                    nullifier_key: None,
-                    value_info: Some(value_info),
-                    resource_ciphertext: Some([0u8; _]),
-                    resource_ciphertext_len: 0,
-                    discovery_ciphertext: Some([0u8; _]),
-                    discovery_ciphertext_len: 0,
-                    label_info: Some(label_info),
-                    auth_sig: None,
-                    forwarder_info: None,
-                };
+                    &payment_addr,
+                    erc20_token_addr,
+                    amount.into(),
+                    consumed_nullifiers_digest,
+                    created_count,
+                );
+                // Compliance witness
+                created_resources[usize::from(created_count)] = witness.resource;
+                created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
                 // Compute the proof from the witness bytes
                 let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
-                println!("Verification response: {:?}", verify_response);
-                // Compliance witness
-                created_resources[usize::from(created_count)] = resource;
-                created_count += 1;
+                println!("Shielded output verification response: {:?}", verify_response);
             } else if let Ok(addr) = store.evaluate_address(&to) {
-                // Generate randomness for the construction of the resource
-                let mut rand_seed = [0u8; DIGEST_BYTES];
-                rng.fill(&mut rand_seed);
-                // Generate a nullifier key
-                let nullifier_key = NullifierKey::random(&mut rng);
-                // Calculate ephemeral value reference
-                let mut value_ref = [0u8; 32];
-                value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
-                // Derive the nonce
-                let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
-                // The permanent resource
-                let resource = Resource {
-                    value_ref,
-                    is_ephemeral: true,
-                    rand_seed,
-                    nonce,
-                    quantity: amount.into(),
-                    logic_ref,
-                    label_ref: label_ref.0,
-                    nk_commitment: nullifier_key.commit().0,
-                };
-                // The forwarder info
-                let forwarder_info = ForwarderInfo {
-                    call_type: CALL_TYPE_UNWRAP,
-                    ethereum_account_addr: addr.into_array(),
-                    permit: None,
-                };
-                // The action root
-                let action_root = [0u8; DIGEST_BYTES];
                 // The transfer authorization witness
-                let witness = TransferAuthWitness {
-                    resource,
-                    is_consumed: false,
-                    action_root,
-                    nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
-                    value_info: None,
-                    resource_ciphertext: None,
-                    resource_ciphertext_len: 0,
-                    discovery_ciphertext: None,
-                    discovery_ciphertext_len: 0,
-                    label_info: Some(label_info),
-                    auth_sig: None,
-                    forwarder_info: Some(forwarder_info),
-                };
+                let witness = add_transparent_output(
+                    &mut rng,
+                    logic_ref,
+                    &addr,
+                    erc20_token_addr,
+                    amount.into(),
+                    consumed_nullifiers_digest,
+                    created_count,
+                );
+                // Compliance witness
+                created_resources[usize::from(created_count)] = witness.resource;
+                created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
                 // Compute the proof from the witness bytes
                 let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
-                println!("Verification response: {:?}", verify_response);
-                // Compliance witness
-                created_resources[usize::from(created_count)] = resource;
-                created_count += 1;
+                println!("Transparent output verification response: {:?}", verify_response);
             }
             // Construct the compliance witness
             let compliance_witness = ComplianceWitness {
@@ -639,17 +862,17 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // Compute the proof from the witness bytes
             let prove_response = compliance_circuit.circuit_prove(&mut api, input_map).unwrap();
             let verify_response = compliance_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
-            println!("Verification response: {:?}", verify_response);
+            println!("Compliance verification response: {:?}", verify_response);
             // Finally update the state of the pool
             for i in 0..consumed_count {
-                state.nullifier_queue.push(consumed_nullifiers[usize::from(i)]);
+                pool_state.nullifier_queue.push(consumed_nullifiers[usize::from(i)]);
             }
             for i in 0..created_count {
-                state.note_queue.push(created_resources[usize::from(i)]);
+                pool_state.note_queue.push(created_resources[usize::from(i)]);
             }
             // Save the updated state
-            let state_bytes = borsh::to_vec(&state)?;
-            std::fs::write(state_path, state_bytes)?;
+            let state_bytes = borsh::to_vec(&pool_state)?;
+            std::fs::write(pool_state_path, state_bytes)?;
         },
         ClientCommands::Approve { rpc, spender, signer, token } => {},
     }

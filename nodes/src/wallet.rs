@@ -65,7 +65,7 @@ pub const SIGNING_KEY_LEN: usize = 32;
 pub const NULLIFIER_KEY_LEN: usize = 32;
 pub const NULLIFIER_KEY_COMMITMENT_LEN: usize = 32;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, BorshSerialize, BorshDeserialize)]
 pub struct NullifierKey(pub [u8; NULLIFIER_KEY_LEN]);
 
 impl NullifierKey {
@@ -88,7 +88,7 @@ pub struct NullifierKeyCommitment(pub [u8; NULLIFIER_KEY_COMMITMENT_LEN]);
 pub struct ExtendedFullViewingKey {
     pub verifying_key: VerifyingKey,
     pub secret_key: SecretKey,
-    pub nullifier_key_commitment: NullifierKeyCommitment,
+    pub nullifier_key: NullifierKey,
 }
 
 impl ExtendedFullViewingKey {
@@ -97,7 +97,7 @@ impl ExtendedFullViewingKey {
         PaymentAddress {
             verifying_key: self.verifying_key,
             public_key: self.secret_key.public_key(),
-            nullifier_key_commitment: self.nullifier_key_commitment,
+            nullifier_key_commitment: self.nullifier_key.commit(),
         }
     }
 }
@@ -120,8 +120,8 @@ impl BorshSerialize for ExtendedFullViewingKey {
         writer.write_all(&self.verifying_key.to_sec1_bytes())?;
         // Serialize SecretKey as 32 bytes
         writer.write_all(&self.secret_key.to_bytes())?;
-        // NullifierKeyCommitment already derives BorshSerialize
-        BorshSerialize::serialize(&self.nullifier_key_commitment, writer)?;
+        // NullifierKey already derives BorshSerialize
+        self.nullifier_key.serialize(writer)?;
         Ok(())
     }
 }
@@ -140,13 +140,13 @@ impl BorshDeserialize for ExtendedFullViewingKey {
         let secret_key = SecretKey::from_slice(&sk_bytes)
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
 
-        // Deserialize NullifierKeyCommitment
-        let nullifier_key_commitment = NullifierKeyCommitment::deserialize_reader(reader)?;
+        // Deserialize NullifierKey
+        let nullifier_key = NullifierKey::deserialize_reader(reader)?;
 
         Ok(Self {
             verifying_key,
             secret_key,
-            nullifier_key_commitment,
+            nullifier_key,
         })
     }
 }
@@ -238,7 +238,7 @@ impl ExtendedSpendingKey {
         ExtendedFullViewingKey {
             verifying_key: *self.signing_key.verifying_key(),
             secret_key: self.secret_key.clone(),
-            nullifier_key_commitment: self.nullifier_key.commit(),
+            nullifier_key: self.nullifier_key,
         }
     }
 }
