@@ -10,6 +10,7 @@ use ark_ff::PrimeField;
 use alloy::primitives::keccak256;
 use sha2::{Sha256, Digest};
 use borsh::{BorshSerialize, BorshDeserialize};
+use acir::AcirField;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -32,11 +33,11 @@ const MAX_PERMIT_NONCE_LEN: usize = 32;
 const MAX_PERMIT_DEADLINE_LEN: usize = 32;
 const MAX_PERMIT_SIG_LEN: usize = 65;
 const MAX_INPUT_LEN: usize = 256;
-const MAX_OUTPUT_LEN: u32 = 64;
-const MAX_FORWARDER_CALLDATA_LEN: u32 = 340;
-const MAX_BLOBS_PER_PAYLOAD: u32 = 1;
-const MAX_BLOB_LEN: u32 = 340;
-const MAX_LOGIC_DIGEST_BUF_LEN: u32 = 1461;
+const MAX_OUTPUT_LEN: usize = 64;
+const MAX_FORWARDER_CALLDATA_LEN: usize = 340;
+const MAX_BLOBS_PER_PAYLOAD: usize = 1;
+const MAX_BLOB_LEN: usize = 340;
+const MAX_LOGIC_DIGEST_BUF_LEN: usize = 1461;
 pub const CALL_TYPE_WRAP: u8 = 0;
 pub const CALL_TYPE_UNWRAP: u8 = 1;
 const PRF_EXPAND_PERSONALIZATION_LEN: usize = 16;
@@ -58,6 +59,8 @@ const NONCE_DERIVATION_PERSONALIZATION_LEN: usize = 20;
 const NONCE_DERIVATION_PERSONALIZATION: [u8; NONCE_DERIVATION_PERSONALIZATION_LEN] = *b"ARM_NONCE_DERIVATION";
 const NONCE_INDEX_BYTES: usize = 4;
 const NONCE_PREIMAGE_LEN: usize = NONCE_DERIVATION_PERSONALIZATION_LEN + NONCE_INDEX_BYTES + DIGEST_BYTES;
+const PAYLOAD_LEN_BYTES: usize = 4;
+const BLOB_LEN_BYTES: u32 = 4;
 //const MAX_COMPLIANCE_DIGEST_BUF_LEN: u32 = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 
 /// Construct input value from Option type
@@ -310,6 +313,7 @@ impl From<LabelInfo> for InputValue {
 
 /// The PermitInfo contains information about the permit2 signature that is used to generate
 /// logic proofs over resources.
+#[derive(Copy, Clone)]
 pub struct PermitInfo {
     /// Nonce of the permit2 signature.
     pub permit_nonce: [u8; MAX_PERMIT_NONCE_LEN],
@@ -341,7 +345,7 @@ impl From<PermitInfo> for InputValue {
 }
 
 /// ForwarderInfo holds information about the forwarder contract being used by a transaction.
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 pub struct ForwarderInfo {
     /// Wrapping/Unwrapping of a resource (i.e., mint/burn).
     pub call_type: u8,
@@ -596,6 +600,154 @@ impl From<ComplianceWitness> for InputValue {
         map.insert("rcv".to_string(), res.rcv.into());
         InputValue::Struct(map)
     }
+}
+
+/// An expirable blob consists of a blob and a deletion criterion.
+#[derive(Copy, Clone, Debug)]
+pub struct ExpirableBlob {
+    /// The blob data as a vector of u32 words.
+    pub blob: [u8; MAX_BLOB_LEN],
+    pub blob_len: u32,
+    /// The deletion criterion for the blob.
+    pub deletion_criterion: bool,
+}
+
+/// Application data contains four different types of payloads.
+#[derive(Copy, Clone, Debug)]
+pub struct AppData {
+    /// The resource payload blobs.
+    pub resource_payload: [ExpirableBlob; MAX_BLOBS_PER_PAYLOAD],
+    pub resource_payload_len: u32,
+    /// The application payload blobs.
+    pub application_payload: [ExpirableBlob; MAX_BLOBS_PER_PAYLOAD],
+    pub application_payload_len: u32,
+    /// The external payload blobs.
+    pub external_payload: [ExpirableBlob; MAX_BLOBS_PER_PAYLOAD],
+    pub external_payload_len: u32,
+    /// The discovery payload blobs.
+    pub discovery_payload: [ExpirableBlob; MAX_BLOBS_PER_PAYLOAD],
+    pub discovery_payload_len: u32,
+}
+
+impl Default for AppData {
+    /// Creates a new, empty AppData.
+    fn default() -> Self {
+        let payload = [ExpirableBlob {
+            blob: [0; MAX_BLOB_LEN],
+            blob_len: 0,
+            deletion_criterion: false,
+        }; MAX_BLOBS_PER_PAYLOAD];
+        AppData {
+            resource_payload: payload,
+            resource_payload_len: 0,
+            application_payload: payload,
+            application_payload_len: 0,
+            external_payload: payload,
+            external_payload_len: 0,
+            discovery_payload: payload,
+            discovery_payload_len: 0,
+        }
+    }
+}
+
+/// Represents a logic instance with its associated data.
+pub struct ResourceLogicInstance {
+    /// The logic instance's tag (either commitment or nullifier)
+    pub tag: [u8; DIGEST_BYTES],
+    /// The root digest of the logic instance.
+    pub action_root: [u8; DIGEST_BYTES],
+    /// Indicates whether the logic instance is for a consumed resource.
+    pub is_consumed: bool,
+    /// The application data associated with the logic instance.
+    pub app_data: AppData,
+}
+
+impl ResourceLogicInstance {
+    pub fn digest(self) -> FieldElement {
+        let mut buf = [0; MAX_LOGIC_DIGEST_BUF_LEN];
+        let mut buf_len = 0;
+        write_bytes(&mut buf, &mut buf_len, &self.tag);
+        write_bytes(&mut buf, &mut buf_len, &self.action_root);
+        write_bytes(&mut buf, &mut buf_len, &[self.is_consumed as u8]);
+
+        let lists = [
+            (self.app_data.resource_payload, self.app_data.resource_payload_len),
+            (self.app_data.application_payload, self.app_data.application_payload_len),
+            (self.app_data.external_payload, self.app_data.external_payload_len),
+            (self.app_data.discovery_payload, self.app_data.discovery_payload_len),
+        ];
+
+        for list_idx in 0..4 {
+            let list = lists[list_idx].0;
+            let list_len = lists[list_idx].1;
+            
+            let len_bytes = u32::from(list_len).to_le_bytes();
+            write_bytes(&mut buf, &mut buf_len, &len_bytes);
+
+            for p_idx in 0..MAX_BLOBS_PER_PAYLOAD {
+                let p = list[p_idx];
+                let p_len_bytes = u32::from(p.blob_len).to_le_bytes();
+                write_bytes(&mut buf, &mut buf_len, &p_len_bytes);
+                write_bytes(&mut buf, &mut buf_len, &p.blob);
+                write_bytes(&mut buf, &mut buf_len, &[p.deletion_criterion as u8]);
+            }
+        }
+        assert_eq!(buf_len, MAX_LOGIC_DIGEST_BUF_LEN, "logic instance digest pre-image malformed");
+        FieldElement::from_le_bytes_reduce(keccak256(buf).as_slice())
+    }
+}
+
+pub fn encode_wrap_forwarder_input(
+    erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
+    quantity: u128,
+    nonce: [u8; MAX_PERMIT_NONCE_LEN],
+    deadline: [u8; MAX_PERMIT_DEADLINE_LEN],
+    ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
+    action_tree_root: [u8; 32],
+    signature: [u8; MAX_PERMIT_SIG_LEN],
+) -> ([u8; MAX_INPUT_LEN], usize) {
+    let mut res = [0; MAX_INPUT_LEN];
+    let mut offset: usize = 0;
+    write_bytes(&mut res, &mut offset, &[CALL_TYPE_WRAP]);
+    write_bytes(&mut res, &mut offset, &erc20_token_addr);
+    // Convert u128 to 16 bytes (Big-Endian)
+    let quantity_bytes = u128::from(quantity).to_be_bytes();
+    write_bytes(&mut res, &mut offset, &quantity_bytes);
+    write_bytes(&mut res, &mut offset, &nonce);
+    write_bytes(&mut res, &mut offset, &deadline);
+    write_bytes(&mut res, &mut offset, &ethereum_account_addr);
+    write_bytes(&mut res, &mut offset, &action_tree_root);
+    write_bytes(&mut res, &mut offset, &signature);
+    (res, offset)
+}
+
+pub fn encode_unwrap_forwarder_input(
+    erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
+    ethereum_account_addr: [u8; MAX_ETH_ADDR_LEN],
+    quantity: u128,
+) -> ([u8; MAX_INPUT_LEN], usize) {
+    let mut res = [0; MAX_INPUT_LEN];
+    let mut offset: usize = 0;
+    write_bytes(&mut res, &mut offset, &[CALL_TYPE_UNWRAP]);
+    write_bytes(&mut res, &mut offset, &erc20_token_addr);
+    write_bytes(&mut res, &mut offset, &ethereum_account_addr);
+    // Convert u128 to 16 bytes (Big-Endian)
+    let quantity_bytes = u128::from(quantity).to_be_bytes();
+    write_bytes(&mut res, &mut offset, &quantity_bytes);
+    (res, offset)
+}
+
+pub fn encode_forwarder_calldata(
+    forwarder: [u8; MAX_FORWARDER_ADDR_LEN],
+    input: [u8; MAX_INPUT_LEN],
+    output: [u8; MAX_OUTPUT_LEN],
+) -> ([u8; MAX_FORWARDER_CALLDATA_LEN], usize) {
+    let mut res = [0; MAX_FORWARDER_CALLDATA_LEN];
+    let mut offset: usize = 0;
+    write_bytes(&mut res, &mut offset, &forwarder);
+    write_bytes(&mut res, &mut offset, &input);
+    write_bytes(&mut res, &mut offset, &output);
+    (res, offset)
 }
 
 #[cfg(test)]

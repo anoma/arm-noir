@@ -60,6 +60,12 @@ use borsh::{BorshSerialize, BorshDeserialize};
 use std::collections::BTreeMap;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::Signature;
+use client::ResourceLogicInstance;
+use client::AppData;
+use client::ExpirableBlob;
+use client::encode_wrap_forwarder_input;
+use client::encode_forwarder_calldata;
+use client::encode_unwrap_forwarder_input;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -67,6 +73,7 @@ const FORWARDER_ADDR_LEN: usize = 20;
 const ERC20_TOKEN_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
 const MAX_ENCRYPTION_PK_LEN: usize = 65;
+const MAX_OUTPUT_LEN: usize = 64;
 
 /// CLI interface for the UltraHonk based AnomaPay implementation
 #[derive(Parser)]
@@ -409,7 +416,7 @@ impl ClientState {
 fn add_shielded_input(
     spending_key: ExtendedSpendingKey,
     note: Resource,
-) -> (TransferAuthWitness, ConsumedResourceWitness) {
+) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance) {
     // The value info
     let mut value_info = ValueInfo {
         auth_pk: [0u8; _],
@@ -446,7 +453,17 @@ fn add_shielded_input(
             depth: MAX_TREE_DEPTH as u32,
         },
     };
-    (logic_witness, compliance_witness)
+    let resource_commitment = compliance_witness.resource.commitment();
+    let resource_nullifier = compliance_witness.
+        resource
+        .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+    let logic_instance = ResourceLogicInstance {
+        tag: resource_nullifier,
+        action_root: action_root,
+        is_consumed: logic_witness.is_consumed,
+        app_data: AppData::default(),
+    };
+    (logic_witness, compliance_witness, logic_instance)
 }
 
 fn add_transparent_input(
@@ -455,7 +472,7 @@ fn add_transparent_input(
     addr: Address,
     erc20_token_addr: Address,
     amount: u128,
-) -> (TransferAuthWitness, ConsumedResourceWitness) {
+) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance) {
     // Compute the label reference
     let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
     label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
@@ -525,7 +542,40 @@ fn add_transparent_input(
             depth: MAX_TREE_DEPTH as u32,
         },
     };
-    (logic_witness, compliance_witness)
+    // Encode forwarder calldata
+    let (enc_input, enc_len) = encode_wrap_forwarder_input(
+        label_info.erc20_token_addr,
+        resource.quantity,
+        permit_info.permit_nonce,
+        permit_info.permit_deadline,
+        forwarder_info.ethereum_account_addr,
+        action_root,
+        permit_info.permit_sig,
+    );
+    let (data, data_len) = encode_forwarder_calldata(
+        label_info.forwarder_addr,
+        enc_input,
+        [0; MAX_OUTPUT_LEN],
+    );
+    // Finally, construct the application data
+    let mut app_data = AppData::default();
+    app_data.external_payload[0] = ExpirableBlob {
+        blob: data,
+        blob_len: data_len.try_into().expect("data length too large"),
+        deletion_criterion: false,
+    };
+    app_data.external_payload_len = 1;
+    let resource_commitment = compliance_witness.resource.commitment();
+    let resource_nullifier = compliance_witness.
+        resource
+        .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+    let logic_instance = ResourceLogicInstance {
+        tag: resource_nullifier,
+        action_root: action_root,
+        is_consumed: logic_witness.is_consumed,
+        app_data,
+    };
+    (logic_witness, compliance_witness, logic_instance)
 }
 
 fn add_shielded_output(
@@ -536,7 +586,7 @@ fn add_shielded_output(
     amount: u128,
     consumed_nullifiers_digest: [u8; DIGEST_BYTES],
     created_count: u8,
-) -> TransferAuthWitness {
+) -> (TransferAuthWitness, ResourceLogicInstance) {
     // Compute the label reference
     let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
     label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
@@ -577,6 +627,11 @@ fn add_shielded_output(
     };
     // The action root
     let action_root = [0u8; DIGEST_BYTES];
+    //
+    let resource_ciphertext = [0u8; _];
+    let resource_ciphertext_len = 0;
+    let discovery_ciphertext = [0u8; _];
+    let discovery_ciphertext_len = 0;
     // The transfer authorization witness
     let witness = TransferAuthWitness {
         resource,
@@ -584,15 +639,39 @@ fn add_shielded_output(
         action_root,
         nullifier_key: None,
         value_info: Some(value_info),
-        resource_ciphertext: Some([0u8; _]),
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: Some([0u8; _]),
-        discovery_ciphertext_len: 0,
+        resource_ciphertext: Some(resource_ciphertext),
+        resource_ciphertext_len,
+        discovery_ciphertext: Some(discovery_ciphertext),
+        discovery_ciphertext_len,
         label_info: Some(label_info),
         auth_sig: None,
         forwarder_info: None,
     };
-    witness
+    // Construct the application data
+    let mut app_data = AppData::default();
+    // Generate resource_payload
+    app_data.resource_payload[0] = ExpirableBlob {
+        blob: resource_ciphertext,
+        blob_len: resource_ciphertext_len,
+        deletion_criterion: true,
+    };
+    app_data.resource_payload_len = 1;
+    // Generate discovery_payload
+    app_data.discovery_payload[0] = ExpirableBlob {
+        blob: discovery_ciphertext,
+        blob_len: discovery_ciphertext_len,
+        deletion_criterion: true,
+    };
+    app_data.discovery_payload_len = 1;
+    let resource_commitment = witness.resource.commitment();
+    // Finally construct the resource logic instance
+    let logic_instance = ResourceLogicInstance {
+        tag: resource_commitment,
+        action_root: action_root,
+        is_consumed: witness.is_consumed,
+        app_data,
+    };
+    (witness, logic_instance)
 }
 
 fn add_transparent_output(
@@ -603,7 +682,7 @@ fn add_transparent_output(
     amount: u128,
     consumed_nullifiers_digest: [u8; DIGEST_BYTES],
     created_count: u8,
-) -> TransferAuthWitness {
+) -> (TransferAuthWitness, ResourceLogicInstance) {
     // Compute the label reference
     let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
     label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
@@ -658,7 +737,32 @@ fn add_transparent_output(
         auth_sig: None,
         forwarder_info: Some(forwarder_info),
     };
-    witness
+    let (enc_input, enc_len) = encode_unwrap_forwarder_input(
+        label_info.erc20_token_addr,
+        forwarder_info.ethereum_account_addr,
+        resource.quantity,
+    );
+    let (data, data_len) = encode_forwarder_calldata(
+        label_info.forwarder_addr,
+        enc_input,
+        [0; MAX_OUTPUT_LEN],
+    );
+    // Finally, construct the application data
+    let mut app_data = AppData::default();
+    app_data.external_payload[0] = ExpirableBlob {
+        blob: data,
+        blob_len: data_len.try_into().expect("data length too large"),
+        deletion_criterion: false,
+    };
+    app_data.external_payload_len = 1;
+    let resource_commitment = witness.resource.commitment();
+    let logic_instance = ResourceLogicInstance {
+        tag: resource_commitment,
+        action_root: action_root,
+        is_consumed: witness.is_consumed,
+        app_data,
+    };
+    (witness, logic_instance)
 }
 
 // Handle client subcommands
@@ -737,13 +841,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                             continue;
                         }
                         value_acc += note.quantity;
-                        let (logic_witness, compliance_witness) = add_shielded_input(spending_key.clone(), note.clone());
+                        let (logic_witness, compliance_witness, logic_instance) = add_shielded_input(spending_key.clone(), note.clone());
                         consumed_data[usize::from(consumed_count)] = compliance_witness;
-                        let resource_commitment = compliance_witness.resource.commitment();
-                        let resource_nullifier = compliance_witness.
-                            resource
-                            .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-                        consumed_nullifiers[usize::from(consumed_count)] = resource_nullifier;
+                        consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
                         consumed_count += 1;
                         let mut input_map = InputMap::new();
                         input_map.insert("witness".to_string(), logic_witness.into());
@@ -751,6 +851,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                         let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                         println!("Shielded input verification response: {:?}", verify_response);
+                        assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
                     }
                 }
                 // Send the change back to the sender if there's any
@@ -759,7 +860,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                let (logic_witness, compliance_witness) = add_transparent_input(
+                let (logic_witness, compliance_witness, logic_instance) = add_transparent_input(
                     &mut rng,
                     logic_ref,
                     addr,
@@ -767,11 +868,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     amount.into(),
                 );
                 consumed_data[usize::from(consumed_count)] = compliance_witness;
-                let resource_commitment = compliance_witness.resource.commitment();
-                let resource_nullifier = compliance_witness.
-                    resource
-                    .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-                consumed_nullifiers[usize::from(consumed_count)] = resource_nullifier;
+                consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
                 consumed_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), logic_witness.into());
@@ -779,12 +876,13 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Transparent input verification response: {:?}", verify_response);
+                assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
             }
             // Compute the digest of the consumed nullifiers
             let consumed_nullifiers_digest = Resource::hash_nullifiers(consumed_nullifiers, consumed_count.into());
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
-                let witness = add_shielded_output(
+                let (witness, logic_instance) = add_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -802,10 +900,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Change proof verification response: {:?}", verify_response);
+                assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                let witness = add_shielded_output(
+                let (witness, logic_instance) = add_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -823,9 +922,10 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Shielded output verification response: {:?}", verify_response);
+                assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
-                let witness = add_transparent_output(
+                let (witness, logic_instance) = add_transparent_output(
                     &mut rng,
                     logic_ref,
                     &addr,
@@ -843,6 +943,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let prove_response = logic_circuit.circuit_prove(&mut api, input_map).unwrap();
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Transparent output verification response: {:?}", verify_response);
+                assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
             }
             // Construct the compliance witness
             let compliance_witness = ComplianceWitness {
