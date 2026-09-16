@@ -518,7 +518,7 @@ impl From<ConsumedResourceWitness> for InputValue {
 }
 
 /// Public information of consumed resources.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct ConsumedResourcePublic {
     /// The nullifier of the consumed [Resource].
     pub resource_nullifier: [u8; DIGEST_BYTES],
@@ -540,7 +540,7 @@ impl From<ConsumedResourcePublic> for InputValue {
 }
 
 /// Public information of created resources.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct CreatedResourcePublic {
     /// The commitment to the created [Resource].
     pub resource_commitment: [u8; DIGEST_BYTES],
@@ -592,6 +592,7 @@ impl From<EmbeddedCurvePoint> for InputValue {
 }
 
 /// The compliance instance contains all public inputs to the compliance proof.
+#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
 pub struct ComplianceInstance {
     /// Public information of consumed resources
     pub consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
@@ -756,6 +757,7 @@ impl Default for AppData {
 }
 
 /// Represents a logic instance with its associated data.
+#[derive(Copy, Clone, Debug, Default)]
 pub struct ResourceLogicInstance {
     /// The logic instance's tag (either commitment or nullifier)
     pub tag: [u8; DIGEST_BYTES],

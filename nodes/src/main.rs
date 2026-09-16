@@ -422,376 +422,11 @@ impl ClientState {
     }
 }
 
-fn build_shielded_input<B: Backend>(
-    api: &mut BarretenbergApi<B>,
-    spending_key: ExtendedSpendingKey,
-    note: Resource,
-) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
-    // The value info
-    let mut value_info = ValueInfo {
-        auth_pk: [0u8; _],
-        encryption_pk: [0u8; _],
-    };
-    let payment_addr = spending_key.to_viewing_key().to_payment_address();
-    value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
-    value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
-    // The action root
-    let action_root = [0u8; DIGEST_BYTES];
-    // Sign over the resource
-    let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
-    // The transfer authorization witness
-    let logic_witness = TransferAuthWitness {
-        resource: note.clone(),
-        is_consumed: true,
-        action_root,
-        nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
-        value_info: Some(value_info),
-        resource_ciphertext: None,
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: None,
-        discovery_ciphertext_len: 0,
-        label_info: None,
-        auth_sig: Some(auth_sig.to_bytes().into()),
-        forwarder_info: None,
-    };
-    // Compliance witness
-    let compliance_witness = ConsumedResourceWitness {
-        resource: logic_witness.resource,
-        nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
-        cm_merkle_path: MerklePath {
-            path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
-            depth: MAX_TREE_DEPTH,
-        },
-    };
-    let resource_commitment = compliance_witness.resource.commitment();
-    let resource_nullifier = compliance_witness.
-        resource
-        .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-    let logic_instance = ResourceLogicInstance {
-        tag: resource_nullifier,
-        action_root: action_root,
-        is_consumed: logic_witness.is_consumed,
-        app_data: AppData::default(),
-    };
-    let commitment_tree_root = compliance_witness.cm_merkle_path.root(api, resource_commitment);
-    let compliance_public = ConsumedResourcePublic {
-        resource_nullifier,
-        resource_logic_ref: note.logic_ref,
-        commitment_tree_root,
-    };
-    (logic_witness, compliance_witness, logic_instance, compliance_public)
-}
-
-fn build_transparent_input(
-    rng: &mut impl Rng,
-    logic_ref: [u8; DIGEST_BYTES],
-    addr: Address,
-    erc20_token_addr: Address,
-    amount: u128,
-) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
-    // Compute the label reference
-    let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-    label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
-    label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
-    let label_ref = keccak256(label_ref_bytes);
-    // The label info
-    let label_info = LabelInfo {
-        forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-        erc20_token_addr: erc20_token_addr.into_array(),
-    };
-    // Generate randomness for the construction of the resource
-    let mut rand_seed = [0u8; DIGEST_BYTES];
-    rng.fill(&mut rand_seed);
-    let mut nonce = [0u8; DIGEST_BYTES];
-    rng.fill(&mut nonce);
-    // Generate a nullifier key
-    let nullifier_key = NullifierKey::random(rng);
-    // Calculate ephemeral value reference
-    let mut value_ref = [0u8; 32];
-    value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
-    // The ephemeral resource
-    let resource = Resource {
-        value_ref,
-        is_ephemeral: true,
-        rand_seed,
-        nonce,
-        quantity: amount.into(),
-        logic_ref,
-        label_ref: label_ref.0,
-        nk_commitment: nullifier_key.commit().0,
-    };
-    // The permit info
-    let permit_info = PermitInfo {
-        permit_nonce: [0u8; _],
-        permit_deadline: [0u8; _],
-        permit_sig: [0u8; _],
-    };
-    // The forwarder info
-    let forwarder_info = ForwarderInfo {
-        call_type: CALL_TYPE_WRAP,
-        ethereum_account_addr: addr.into_array(),
-        permit: Some(permit_info),
-    };
-    // The action root
-    let action_root = [0u8; DIGEST_BYTES];
-    // The transfer authorization witness
-    let logic_witness = TransferAuthWitness {
-        resource,
-        is_consumed: true,
-        action_root,
-        nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
-        value_info: None,
-        resource_ciphertext: None,
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: None,
-        discovery_ciphertext_len: 0,
-        label_info: Some(label_info),
-        auth_sig: None,
-        forwarder_info: Some(forwarder_info),
-    };
-    // Compliance witness
-    let compliance_witness = ConsumedResourceWitness {
-        resource,
-        nf_key: client::NullifierKey { bytes: nullifier_key.0 },
-        cm_merkle_path: MerklePath {
-            path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
-            depth: MAX_TREE_DEPTH,
-        },
-    };
-    // Encode forwarder calldata
-    let (enc_input, enc_len) = encode_wrap_forwarder_input(
-        label_info.erc20_token_addr,
-        resource.quantity,
-        permit_info.permit_nonce,
-        permit_info.permit_deadline,
-        forwarder_info.ethereum_account_addr,
-        action_root,
-        permit_info.permit_sig,
-    );
-    let (data, data_len) = encode_forwarder_calldata(
-        label_info.forwarder_addr,
-        enc_input,
-        [0; MAX_OUTPUT_LEN],
-    );
-    // Finally, construct the application data
-    let mut app_data = AppData::default();
-    app_data.external_payload[0] = ExpirableBlob {
-        blob: data,
-        blob_len: data_len.try_into().expect("data length too large"),
-        deletion_criterion: false,
-    };
-    app_data.external_payload_len = 1;
-    let resource_commitment = compliance_witness.resource.commitment();
-    let resource_nullifier = compliance_witness.
-        resource
-        .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-    let logic_instance = ResourceLogicInstance {
-        tag: resource_nullifier,
-        action_root: action_root,
-        is_consumed: logic_witness.is_consumed,
-        app_data,
-    };
-    let compliance_public = ConsumedResourcePublic {
-        resource_nullifier,
-        resource_logic_ref: logic_ref,
-        commitment_tree_root: INITIAL_ROOT,
-    };
-    (logic_witness, compliance_witness, logic_instance, compliance_public)
-}
-
-fn build_shielded_output(
-    rng: &mut impl Rng,
-    logic_ref: [u8; DIGEST_BYTES],
-    payment_addr: &PaymentAddress,
-    erc20_token_addr: Address,
-    amount: u128,
-    consumed_nullifiers_digest: [u8; DIGEST_BYTES],
-    created_count: u8,
-) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
-    // Compute the label reference
-    let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-    label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
-    label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
-    let label_ref = keccak256(label_ref_bytes);
-    // The label info
-    let label_info = LabelInfo {
-        forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-        erc20_token_addr: erc20_token_addr.into_array(),
-    };
-    // Generate randomness for the construction of the resource
-    let mut rand_seed = [0u8; DIGEST_BYTES];
-    rng.fill(&mut rand_seed);
-    // The value info
-    let mut value_info = ValueInfo {
-        auth_pk: [0u8; _],
-        encryption_pk: [0u8; _],
-    };
-    value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
-    value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
-    // Calculate persistent value reference
-    let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
-    value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
-    value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
-    let value_ref = keccak256(value_ref_bytes);
-    // Derive the nonce
-    let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
-    // The permanent resource
-    let resource = Resource {
-        value_ref: value_ref.0,
-        is_ephemeral: false,
-        rand_seed,
-        nonce,
-        quantity: amount.into(),
-        logic_ref,
-        label_ref: label_ref.0,
-        nk_commitment: payment_addr.nullifier_key_commitment.0,
-    };
-    // The action root
-    let action_root = [0u8; DIGEST_BYTES];
-    //
-    let resource_ciphertext = [0u8; _];
-    let resource_ciphertext_len = 0;
-    let discovery_ciphertext = [0u8; _];
-    let discovery_ciphertext_len = 0;
-    // The transfer authorization witness
-    let witness = TransferAuthWitness {
-        resource,
-        is_consumed: false,
-        action_root,
-        nullifier_key: None,
-        value_info: Some(value_info),
-        resource_ciphertext: Some(resource_ciphertext),
-        resource_ciphertext_len,
-        discovery_ciphertext: Some(discovery_ciphertext),
-        discovery_ciphertext_len,
-        label_info: Some(label_info),
-        auth_sig: None,
-        forwarder_info: None,
-    };
-    // Construct the application data
-    let mut app_data = AppData::default();
-    // Generate resource_payload
-    app_data.resource_payload[0] = ExpirableBlob {
-        blob: resource_ciphertext,
-        blob_len: resource_ciphertext_len,
-        deletion_criterion: true,
-    };
-    app_data.resource_payload_len = 1;
-    // Generate discovery_payload
-    app_data.discovery_payload[0] = ExpirableBlob {
-        blob: discovery_ciphertext,
-        blob_len: discovery_ciphertext_len,
-        deletion_criterion: true,
-    };
-    app_data.discovery_payload_len = 1;
-    let resource_commitment = witness.resource.commitment();
-    // Finally construct the resource logic instance
-    let logic_instance = ResourceLogicInstance {
-        tag: resource_commitment,
-        action_root: action_root,
-        is_consumed: witness.is_consumed,
-        app_data,
-    };
-    let compliance_public = CreatedResourcePublic {
-        resource_commitment,
-        resource_logic_ref: logic_ref,
-    };
-    (witness, logic_instance, compliance_public)
-}
-
-fn build_transparent_output(
-    rng: &mut impl Rng,
-    logic_ref: [u8; DIGEST_BYTES],
-    addr: &Address,
-    erc20_token_addr: Address,
-    amount: u128,
-    consumed_nullifiers_digest: [u8; DIGEST_BYTES],
-    created_count: u8,
-) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
-    // Compute the label reference
-    let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-    label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
-    label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
-    let label_ref = keccak256(label_ref_bytes);
-    // The label info
-    let label_info = LabelInfo {
-        forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-        erc20_token_addr: erc20_token_addr.into_array(),
-    };
-    // Generate randomness for the construction of the resource
-    let mut rand_seed = [0u8; DIGEST_BYTES];
-    rng.fill(&mut rand_seed);
-    // Generate a nullifier key
-    let nullifier_key = NullifierKey::random(rng);
-    // Calculate ephemeral value reference
-    let mut value_ref = [0u8; 32];
-    value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
-    // Derive the nonce
-    let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
-    // The permanent resource
-    let resource = Resource {
-        value_ref,
-        is_ephemeral: true,
-        rand_seed,
-        nonce,
-        quantity: amount.into(),
-        logic_ref,
-        label_ref: label_ref.0,
-        nk_commitment: nullifier_key.commit().0,
-    };
-    // The forwarder info
-    let forwarder_info = ForwarderInfo {
-        call_type: CALL_TYPE_UNWRAP,
-        ethereum_account_addr: addr.into_array(),
-        permit: None,
-    };
-    // The action root
-    let action_root = [0u8; DIGEST_BYTES];
-    // The transfer authorization witness
-    let witness = TransferAuthWitness {
-        resource,
-        is_consumed: false,
-        action_root,
-        nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
-        value_info: None,
-        resource_ciphertext: None,
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: None,
-        discovery_ciphertext_len: 0,
-        label_info: Some(label_info),
-        auth_sig: None,
-        forwarder_info: Some(forwarder_info),
-    };
-    let (enc_input, enc_len) = encode_unwrap_forwarder_input(
-        label_info.erc20_token_addr,
-        forwarder_info.ethereum_account_addr,
-        resource.quantity,
-    );
-    let (data, data_len) = encode_forwarder_calldata(
-        label_info.forwarder_addr,
-        enc_input,
-        [0; MAX_OUTPUT_LEN],
-    );
-    // Finally, construct the application data
-    let mut app_data = AppData::default();
-    app_data.external_payload[0] = ExpirableBlob {
-        blob: data,
-        blob_len: data_len.try_into().expect("data length too large"),
-        deletion_criterion: false,
-    };
-    app_data.external_payload_len = 1;
-    let resource_commitment = witness.resource.commitment();
-    let logic_instance = ResourceLogicInstance {
-        tag: resource_commitment,
-        action_root: action_root,
-        is_consumed: witness.is_consumed,
-        app_data,
-    };
-    let compliance_public = CreatedResourcePublic {
-        resource_commitment,
-        resource_logic_ref: logic_ref,
-    };
-    (witness, logic_instance, compliance_public)
+#[derive(Debug)]
+struct Transaction {
+    logic_instances: Vec<(ResourceLogicInstance, Vec<Vec<u8>>)>,
+    compliance_instance: ComplianceInstance,
+    compliance_proof: Vec<Vec<u8>>,
 }
 
 struct TransactionBuilder {
@@ -800,10 +435,14 @@ struct TransactionBuilder {
     // The consumed data
     consumed_data: [ConsumedResourceWitness; MAX_CONSUMED],
     consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
+    consumed_logics: [ResourceLogicInstance; MAX_CONSUMED],
+    consumed_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
     consumed_count: u8,
     // The created data
     created_resources: [Resource; MAX_CREATED],
     created_publics: [CreatedResourcePublic; MAX_CREATED],
+    created_logics: [ResourceLogicInstance; MAX_CREATED],
+    created_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
     created_count: u8,
     // Quantity delta
     delta_map: BTreeMap<EmbeddedCurvePoint, i128>,
@@ -827,14 +466,390 @@ impl TransactionBuilder {
             consumed_nullifiers: Default::default(),
             consumed_data: Default::default(),
             consumed_publics: Default::default(),
+            consumed_logics: Default::default(),
+            consumed_logic_proofs: Default::default(),
             consumed_count: 0,
             created_resources: Default::default(),
             created_publics: Default::default(),
+            created_logics: Default::default(),
+            created_logic_proofs: Default::default(),
             created_count: 0,
             delta_map: Default::default(),
             logic_circuit,
             compliance_circuit,
         }
+    }
+
+    fn build_shielded_input<B: Backend>(
+        api: &mut BarretenbergApi<B>,
+        spending_key: ExtendedSpendingKey,
+        note: Resource,
+    ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
+        // The value info
+        let mut value_info = ValueInfo {
+            auth_pk: [0u8; _],
+            encryption_pk: [0u8; _],
+        };
+        let payment_addr = spending_key.to_viewing_key().to_payment_address();
+        value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
+        value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
+        // The action root
+        let action_root = [0u8; DIGEST_BYTES];
+        // Sign over the resource
+        let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
+        // The transfer authorization witness
+        let logic_witness = TransferAuthWitness {
+            resource: note.clone(),
+            is_consumed: true,
+            action_root,
+            nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
+            value_info: Some(value_info),
+            resource_ciphertext: None,
+            resource_ciphertext_len: 0,
+            discovery_ciphertext: None,
+            discovery_ciphertext_len: 0,
+            label_info: None,
+            auth_sig: Some(auth_sig.to_bytes().into()),
+            forwarder_info: None,
+        };
+        // Compliance witness
+        let compliance_witness = ConsumedResourceWitness {
+            resource: logic_witness.resource,
+            nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
+            cm_merkle_path: MerklePath {
+                path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+                depth: MAX_TREE_DEPTH,
+            },
+        };
+        let resource_commitment = compliance_witness.resource.commitment();
+        let resource_nullifier = compliance_witness.
+            resource
+            .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+        let logic_instance = ResourceLogicInstance {
+            tag: resource_nullifier,
+            action_root: action_root,
+            is_consumed: logic_witness.is_consumed,
+            app_data: AppData::default(),
+        };
+        let commitment_tree_root = compliance_witness.cm_merkle_path.root(api, resource_commitment);
+        let compliance_public = ConsumedResourcePublic {
+            resource_nullifier,
+            resource_logic_ref: note.logic_ref,
+            commitment_tree_root,
+        };
+        (logic_witness, compliance_witness, logic_instance, compliance_public)
+    }
+
+    fn build_transparent_input(
+        rng: &mut impl Rng,
+        logic_ref: [u8; DIGEST_BYTES],
+        addr: Address,
+        erc20_token_addr: Address,
+        amount: u128,
+    ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
+        // Compute the label reference
+        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+        let label_ref = keccak256(label_ref_bytes);
+        // The label info
+        let label_info = LabelInfo {
+            forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+            erc20_token_addr: erc20_token_addr.into_array(),
+        };
+        // Generate randomness for the construction of the resource
+        let mut rand_seed = [0u8; DIGEST_BYTES];
+        rng.fill(&mut rand_seed);
+        let mut nonce = [0u8; DIGEST_BYTES];
+        rng.fill(&mut nonce);
+        // Generate a nullifier key
+        let nullifier_key = NullifierKey::random(rng);
+        // Calculate ephemeral value reference
+        let mut value_ref = [0u8; 32];
+        value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
+        // The ephemeral resource
+        let resource = Resource {
+            value_ref,
+            is_ephemeral: true,
+            rand_seed,
+            nonce,
+            quantity: amount.into(),
+            logic_ref,
+            label_ref: label_ref.0,
+            nk_commitment: nullifier_key.commit().0,
+        };
+        // The permit info
+        let permit_info = PermitInfo {
+            permit_nonce: [0u8; _],
+            permit_deadline: [0u8; _],
+            permit_sig: [0u8; _],
+        };
+        // The forwarder info
+        let forwarder_info = ForwarderInfo {
+            call_type: CALL_TYPE_WRAP,
+            ethereum_account_addr: addr.into_array(),
+            permit: Some(permit_info),
+        };
+        // The action root
+        let action_root = [0u8; DIGEST_BYTES];
+        // The transfer authorization witness
+        let logic_witness = TransferAuthWitness {
+            resource,
+            is_consumed: true,
+            action_root,
+            nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+            value_info: None,
+            resource_ciphertext: None,
+            resource_ciphertext_len: 0,
+            discovery_ciphertext: None,
+            discovery_ciphertext_len: 0,
+            label_info: Some(label_info),
+            auth_sig: None,
+            forwarder_info: Some(forwarder_info),
+        };
+        // Compliance witness
+        let compliance_witness = ConsumedResourceWitness {
+            resource,
+            nf_key: client::NullifierKey { bytes: nullifier_key.0 },
+            cm_merkle_path: MerklePath {
+                path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+                depth: MAX_TREE_DEPTH,
+            },
+        };
+        // Encode forwarder calldata
+        let (enc_input, enc_len) = encode_wrap_forwarder_input(
+            label_info.erc20_token_addr,
+            resource.quantity,
+            permit_info.permit_nonce,
+            permit_info.permit_deadline,
+            forwarder_info.ethereum_account_addr,
+            action_root,
+            permit_info.permit_sig,
+        );
+        let (data, data_len) = encode_forwarder_calldata(
+            label_info.forwarder_addr,
+            enc_input,
+            [0; MAX_OUTPUT_LEN],
+        );
+        // Finally, construct the application data
+        let mut app_data = AppData::default();
+        app_data.external_payload[0] = ExpirableBlob {
+            blob: data,
+            blob_len: data_len.try_into().expect("data length too large"),
+            deletion_criterion: false,
+        };
+        app_data.external_payload_len = 1;
+        let resource_commitment = compliance_witness.resource.commitment();
+        let resource_nullifier = compliance_witness.
+            resource
+            .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+        let logic_instance = ResourceLogicInstance {
+            tag: resource_nullifier,
+            action_root: action_root,
+            is_consumed: logic_witness.is_consumed,
+            app_data,
+        };
+        let compliance_public = ConsumedResourcePublic {
+            resource_nullifier,
+            resource_logic_ref: logic_ref,
+            commitment_tree_root: INITIAL_ROOT,
+        };
+        (logic_witness, compliance_witness, logic_instance, compliance_public)
+    }
+
+    fn build_shielded_output(
+        rng: &mut impl Rng,
+        logic_ref: [u8; DIGEST_BYTES],
+        payment_addr: &PaymentAddress,
+        erc20_token_addr: Address,
+        amount: u128,
+        consumed_nullifiers_digest: [u8; DIGEST_BYTES],
+        created_count: u8,
+    ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
+        // Compute the label reference
+        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+        let label_ref = keccak256(label_ref_bytes);
+        // The label info
+        let label_info = LabelInfo {
+            forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+            erc20_token_addr: erc20_token_addr.into_array(),
+        };
+        // Generate randomness for the construction of the resource
+        let mut rand_seed = [0u8; DIGEST_BYTES];
+        rng.fill(&mut rand_seed);
+        // The value info
+        let mut value_info = ValueInfo {
+            auth_pk: [0u8; _],
+            encryption_pk: [0u8; _],
+        };
+        value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
+        value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
+        // Calculate persistent value reference
+        let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
+        value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
+        value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
+        let value_ref = keccak256(value_ref_bytes);
+        // Derive the nonce
+        let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
+        // The permanent resource
+        let resource = Resource {
+            value_ref: value_ref.0,
+            is_ephemeral: false,
+            rand_seed,
+            nonce,
+            quantity: amount.into(),
+            logic_ref,
+            label_ref: label_ref.0,
+            nk_commitment: payment_addr.nullifier_key_commitment.0,
+        };
+        // The action root
+        let action_root = [0u8; DIGEST_BYTES];
+        //
+        let resource_ciphertext = [0u8; _];
+        let resource_ciphertext_len = 0;
+        let discovery_ciphertext = [0u8; _];
+        let discovery_ciphertext_len = 0;
+        // The transfer authorization witness
+        let witness = TransferAuthWitness {
+            resource,
+            is_consumed: false,
+            action_root,
+            nullifier_key: None,
+            value_info: Some(value_info),
+            resource_ciphertext: Some(resource_ciphertext),
+            resource_ciphertext_len,
+            discovery_ciphertext: Some(discovery_ciphertext),
+            discovery_ciphertext_len,
+            label_info: Some(label_info),
+            auth_sig: None,
+            forwarder_info: None,
+        };
+        // Construct the application data
+        let mut app_data = AppData::default();
+        // Generate resource_payload
+        app_data.resource_payload[0] = ExpirableBlob {
+            blob: resource_ciphertext,
+            blob_len: resource_ciphertext_len,
+            deletion_criterion: true,
+        };
+        app_data.resource_payload_len = 1;
+        // Generate discovery_payload
+        app_data.discovery_payload[0] = ExpirableBlob {
+            blob: discovery_ciphertext,
+            blob_len: discovery_ciphertext_len,
+            deletion_criterion: true,
+        };
+        app_data.discovery_payload_len = 1;
+        let resource_commitment = witness.resource.commitment();
+        // Finally construct the resource logic instance
+        let logic_instance = ResourceLogicInstance {
+            tag: resource_commitment,
+            action_root: action_root,
+            is_consumed: witness.is_consumed,
+            app_data,
+        };
+        let compliance_public = CreatedResourcePublic {
+            resource_commitment,
+            resource_logic_ref: logic_ref,
+        };
+        (witness, logic_instance, compliance_public)
+    }
+
+    fn build_transparent_output(
+        rng: &mut impl Rng,
+        logic_ref: [u8; DIGEST_BYTES],
+        addr: &Address,
+        erc20_token_addr: Address,
+        amount: u128,
+        consumed_nullifiers_digest: [u8; DIGEST_BYTES],
+        created_count: u8,
+    ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
+        // Compute the label reference
+        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
+        let label_ref = keccak256(label_ref_bytes);
+        // The label info
+        let label_info = LabelInfo {
+            forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
+            erc20_token_addr: erc20_token_addr.into_array(),
+        };
+        // Generate randomness for the construction of the resource
+        let mut rand_seed = [0u8; DIGEST_BYTES];
+        rng.fill(&mut rand_seed);
+        // Generate a nullifier key
+        let nullifier_key = NullifierKey::random(rng);
+        // Calculate ephemeral value reference
+        let mut value_ref = [0u8; 32];
+        value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
+        // Derive the nonce
+        let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
+        // The permanent resource
+        let resource = Resource {
+            value_ref,
+            is_ephemeral: true,
+            rand_seed,
+            nonce,
+            quantity: amount.into(),
+            logic_ref,
+            label_ref: label_ref.0,
+            nk_commitment: nullifier_key.commit().0,
+        };
+        // The forwarder info
+        let forwarder_info = ForwarderInfo {
+            call_type: CALL_TYPE_UNWRAP,
+            ethereum_account_addr: addr.into_array(),
+            permit: None,
+        };
+        // The action root
+        let action_root = [0u8; DIGEST_BYTES];
+        // The transfer authorization witness
+        let witness = TransferAuthWitness {
+            resource,
+            is_consumed: false,
+            action_root,
+            nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+            value_info: None,
+            resource_ciphertext: None,
+            resource_ciphertext_len: 0,
+            discovery_ciphertext: None,
+            discovery_ciphertext_len: 0,
+            label_info: Some(label_info),
+            auth_sig: None,
+            forwarder_info: Some(forwarder_info),
+        };
+        let (enc_input, enc_len) = encode_unwrap_forwarder_input(
+            label_info.erc20_token_addr,
+            forwarder_info.ethereum_account_addr,
+            resource.quantity,
+        );
+        let (data, data_len) = encode_forwarder_calldata(
+            label_info.forwarder_addr,
+            enc_input,
+            [0; MAX_OUTPUT_LEN],
+        );
+        // Finally, construct the application data
+        let mut app_data = AppData::default();
+        app_data.external_payload[0] = ExpirableBlob {
+            blob: data,
+            blob_len: data_len.try_into().expect("data length too large"),
+            deletion_criterion: false,
+        };
+        app_data.external_payload_len = 1;
+        let resource_commitment = witness.resource.commitment();
+        let logic_instance = ResourceLogicInstance {
+            tag: resource_commitment,
+            action_root: action_root,
+            is_consumed: witness.is_consumed,
+            app_data,
+        };
+        let compliance_public = CreatedResourcePublic {
+            resource_commitment,
+            resource_logic_ref: logic_ref,
+        };
+        (witness, logic_instance, compliance_public)
     }
     
     fn add_input<B: Backend>(
@@ -848,16 +863,18 @@ impl TransactionBuilder {
         self.consumed_data[usize::from(self.consumed_count)] = compliance_witness;
         self.consumed_nullifiers[usize::from(self.consumed_count)] = logic_instance.tag;
         self.consumed_publics[usize::from(self.consumed_count)] = compliance_public;
-        self.consumed_count += 1;
+        self.consumed_logics[usize::from(self.consumed_count)] = logic_instance;
         let mut input_map = InputMap::new();
         input_map.insert("witness".to_string(), logic_witness.into());
         // Compute the proof from the witness bytes
         let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
         let verify_response = self.logic_circuit.circuit_verify(api, prove_response.clone()).unwrap();
+        self.consumed_logic_proofs[usize::from(self.consumed_count)] = prove_response.proof;
         println!("Input verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
         // Accumulate delta
         *self.delta_map.entry(compliance_witness.resource.kind(api)).or_insert(0) += compliance_witness.resource.quantity as i128;
+        self.consumed_count += 1;
     }
 
     fn add_output<B: Backend>(
@@ -872,14 +889,16 @@ impl TransactionBuilder {
         // Compliance witness
         self.created_resources[usize::from(self.created_count)] = witness.resource;
         self.created_publics[usize::from(self.created_count)] = compliance_public;
-        self.created_count += 1;
+        self.created_logics[usize::from(self.created_count)] = logic_instance;
         let mut input_map = InputMap::new();
         input_map.insert("witness".to_string(), witness.into());
         // Compute the proof from the witness bytes
         let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
         let verify_response = self.logic_circuit.circuit_verify(api, prove_response.clone()).unwrap();
+        self.created_logic_proofs[usize::from(self.created_count)] = prove_response.proof;
         println!("Change proof verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+        self.created_count += 1;
     }
 
     fn build_compliance_artifacts(&self, rng: &mut impl Rng) -> (ComplianceWitness, ComplianceInstance) {
@@ -925,11 +944,11 @@ impl TransactionBuilder {
     }
 
     fn build<B: Backend>(
-        &mut self,
+        mut self,
         api: &mut BarretenbergApi<B>,
         compliance_witness: ComplianceWitness,
         compliance_instance: ComplianceInstance,
-    ) {
+    ) -> Transaction {
         let mut input_map = InputMap::new();
         input_map.insert("witness".to_string(), compliance_witness.into());
         // Compute the proof from the witness bytes
@@ -937,6 +956,18 @@ impl TransactionBuilder {
         let verify_response = self.compliance_circuit.circuit_verify(api, prove_response.clone()).unwrap();
         println!("Compliance verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), compliance_instance.digest().to_be_bytes());
+        let mut logic_instances = vec![];
+        for idx in 0..usize::from(self.consumed_count) {
+            logic_instances.push((self.consumed_logics[idx], self.consumed_logic_proofs[idx].clone()));
+        }
+        for idx in 0..usize::from(self.created_count) {
+            logic_instances.push((self.created_logics[idx], self.created_logic_proofs[idx].clone()));
+        }
+        Transaction {
+            logic_instances,
+            compliance_instance,
+            compliance_proof: prove_response.proof,
+        }
     }
 }
 
@@ -1006,7 +1037,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         }
                         value_acc += note.quantity;
                         let (logic_witness, compliance_witness, logic_instance, compliance_public) =
-                            build_shielded_input(&mut api, spending_key.clone(), note.clone());
+                            TransactionBuilder::build_shielded_input(&mut api, spending_key.clone(), note.clone());
                         builder.add_input(&mut api, logic_witness, compliance_witness, logic_instance, compliance_public);
                     }
                 }
@@ -1016,7 +1047,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                let (logic_witness, compliance_witness, logic_instance, compliance_public) = build_transparent_input(
+                let (logic_witness, compliance_witness, logic_instance, compliance_public) = TransactionBuilder::build_transparent_input(
                     &mut rng,
                     logic_ref,
                     addr,
@@ -1029,7 +1060,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let consumed_nullifiers_digest = Resource::hash_nullifiers(builder.consumed_nullifiers, builder.consumed_count.into());
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
-                let (witness, logic_instance, compliance_public) = build_shielded_output(
+                let (witness, logic_instance, compliance_public) = TransactionBuilder::build_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -1042,7 +1073,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                let (witness, logic_instance, compliance_public) = build_shielded_output(
+                let (witness, logic_instance, compliance_public) = TransactionBuilder::build_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -1054,7 +1085,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 builder.add_output(&mut api, witness, logic_instance, compliance_public);
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
-                let (witness, logic_instance, compliance_public) = build_transparent_output(
+                let (witness, logic_instance, compliance_public) = TransactionBuilder::build_transparent_output(
                     &mut rng,
                     logic_ref,
                     &addr,
@@ -1066,7 +1097,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 builder.add_output(&mut api, witness, logic_instance, compliance_public);
             }
             let (compliance_witness, compliance_instance) = builder.build_compliance_artifacts(&mut rng);
-            builder.build(&mut api, compliance_witness, compliance_instance);            
             // Finally update the state of the pool
             for i in 0..builder.consumed_count {
                 pool_state.nullifier_queue.push(builder.consumed_nullifiers[usize::from(i)]);
@@ -1074,6 +1104,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             for i in 0..builder.created_count {
                 pool_state.note_queue.push(builder.created_resources[usize::from(i)]);
             }
+            // Finally build the transaction
+            let transaction = builder.build(&mut api, compliance_witness, compliance_instance);
+            println!("Transaction built: {:?}", transaction);
             // Save the updated state
             let state_bytes = borsh::to_vec(&pool_state)?;
             std::fs::write(pool_state_path, state_bytes)?;
