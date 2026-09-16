@@ -499,6 +499,7 @@ impl From<ConsumedResourceWitness> for InputValue {
 }
 
 /// Public information of consumed resources.
+#[derive(Clone, Copy, Default)]
 pub struct ConsumedResourcePublic {
     /// The nullifier of the consumed [Resource].
     pub resource_nullifier: [u8; DIGEST_BYTES],
@@ -520,11 +521,12 @@ impl From<ConsumedResourcePublic> for InputValue {
 }
 
 /// Public information of created resources.
-struct CreatedResourcePublic {
+#[derive(Clone, Copy, Default)]
+pub struct CreatedResourcePublic {
     /// The commitment to the created [Resource].
-    resource_commitment: [u8; DIGEST_BYTES],
+    pub resource_commitment: [u8; DIGEST_BYTES],
     /// The logic reference of the created [Resource].
-    resource_logic_ref: [u8; DIGEST_BYTES],
+    pub resource_logic_ref: [u8; DIGEST_BYTES],
 }
 
 impl From<CreatedResourcePublic> for InputValue {

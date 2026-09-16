@@ -68,6 +68,8 @@ use client::encode_forwarder_calldata;
 use client::encode_unwrap_forwarder_input;
 use client::ConsumedResourcePublic;
 use barretenberg_rs::Backend;
+use alloy::primitives::hex;
+use client::CreatedResourcePublic;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -76,6 +78,8 @@ const ERC20_TOKEN_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
 const MAX_ENCRYPTION_PK_LEN: usize = 65;
 const MAX_OUTPUT_LEN: usize = 64;
+pub static INITIAL_ROOT: [u8; 32] =
+        hex!("cc1d2f838445db7aec431df9ee8a871f40e7aa5e064fc056633ef8c60fab7b06");
 
 /// CLI interface for the UltraHonk based AnomaPay implementation
 #[derive(Parser)]
@@ -481,7 +485,7 @@ fn add_transparent_input(
     addr: Address,
     erc20_token_addr: Address,
     amount: u128,
-) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance) {
+) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
     // Compute the label reference
     let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
     label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
@@ -584,7 +588,12 @@ fn add_transparent_input(
         is_consumed: logic_witness.is_consumed,
         app_data,
     };
-    (logic_witness, compliance_witness, logic_instance)
+    let compliance_public = ConsumedResourcePublic {
+        resource_nullifier,
+        resource_logic_ref: logic_ref,
+        commitment_tree_root: INITIAL_ROOT,
+    };
+    (logic_witness, compliance_witness, logic_instance, compliance_public)
 }
 
 fn add_shielded_output(
@@ -595,7 +604,7 @@ fn add_shielded_output(
     amount: u128,
     consumed_nullifiers_digest: [u8; DIGEST_BYTES],
     created_count: u8,
-) -> (TransferAuthWitness, ResourceLogicInstance) {
+) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
     // Compute the label reference
     let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
     label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
@@ -680,7 +689,11 @@ fn add_shielded_output(
         is_consumed: witness.is_consumed,
         app_data,
     };
-    (witness, logic_instance)
+    let compliance_public = CreatedResourcePublic {
+        resource_commitment,
+        resource_logic_ref: logic_ref,
+    };
+    (witness, logic_instance, compliance_public)
 }
 
 fn add_transparent_output(
@@ -691,7 +704,7 @@ fn add_transparent_output(
     amount: u128,
     consumed_nullifiers_digest: [u8; DIGEST_BYTES],
     created_count: u8,
-) -> (TransferAuthWitness, ResourceLogicInstance) {
+) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
     // Compute the label reference
     let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
     label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
@@ -771,7 +784,11 @@ fn add_transparent_output(
         is_consumed: witness.is_consumed,
         app_data,
     };
-    (witness, logic_instance)
+    let compliance_public = CreatedResourcePublic {
+        resource_commitment,
+        resource_logic_ref: logic_ref,
+    };
+    (witness, logic_instance, compliance_public)
 }
 
 // Handle client subcommands
@@ -822,9 +839,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let mut consumed_nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
             // The consumed data
             let mut consumed_data = [ConsumedResourceWitness::default(); MAX_CONSUMED];
+            let mut consumed_public = [ConsumedResourcePublic::default(); MAX_CONSUMED];
             let mut consumed_count = 0u8;
             // The created data
             let mut created_resources = [Resource::default(); MAX_CREATED];
+            let mut created_public = [CreatedResourcePublic::default(); MAX_CREATED];
             let mut created_count = 0u8;
             // Data about transaction change
             let mut change = None;
@@ -854,6 +873,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                             add_shielded_input(&mut api, spending_key.clone(), note.clone());
                         consumed_data[usize::from(consumed_count)] = compliance_witness;
                         consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
+                        consumed_public[usize::from(consumed_count)] = compliance_public;
                         consumed_count += 1;
                         let mut input_map = InputMap::new();
                         input_map.insert("witness".to_string(), logic_witness.into());
@@ -870,7 +890,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                let (logic_witness, compliance_witness, logic_instance) = add_transparent_input(
+                let (logic_witness, compliance_witness, logic_instance, compliance_public) = add_transparent_input(
                     &mut rng,
                     logic_ref,
                     addr,
@@ -879,6 +899,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 );
                 consumed_data[usize::from(consumed_count)] = compliance_witness;
                 consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
+                consumed_public[usize::from(consumed_count)] = compliance_public;
                 consumed_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), logic_witness.into());
@@ -892,7 +913,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let consumed_nullifiers_digest = Resource::hash_nullifiers(consumed_nullifiers, consumed_count.into());
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
-                let (witness, logic_instance) = add_shielded_output(
+                let (witness, logic_instance, compliance_public) = add_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -903,6 +924,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 );
                 // Compliance witness
                 created_resources[usize::from(created_count)] = witness.resource;
+                created_public[usize::from(created_count)] = compliance_public;
                 created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
@@ -914,7 +936,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                let (witness, logic_instance) = add_shielded_output(
+                let (witness, logic_instance, compliance_public) = add_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -925,6 +947,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 );
                 // Compliance witness
                 created_resources[usize::from(created_count)] = witness.resource;
+                created_public[usize::from(created_count)] = compliance_public;
                 created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
@@ -935,7 +958,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
-                let (witness, logic_instance) = add_transparent_output(
+                let (witness, logic_instance, compliance_public) = add_transparent_output(
                     &mut rng,
                     logic_ref,
                     &addr,
