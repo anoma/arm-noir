@@ -18,6 +18,7 @@ use noirc_abi::InputMap;
 use noirc_artifacts::program::CompiledProgram;
 use std::io::Read;
 use std::path::PathBuf;
+use barretenberg_rs::Backend;
 
 /// The directory containing the common reference string
 const CRS_DIR: &str = ".bb-crs";
@@ -68,7 +69,7 @@ pub struct BarretenbergCircuit {
 
 impl BarretenbergCircuit {
     /// Load up the aggregation circuit from disk
-    pub fn new(api: &mut BarretenbergApi<FfiBackend>, program_artifact_path: PathBuf) -> Self {
+    pub fn new<B: Backend>(api: &mut BarretenbergApi<B>, program_artifact_path: PathBuf) -> Self {
         let artifact_name = program_artifact_path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -117,9 +118,9 @@ impl BarretenbergCircuit {
     }
 
     /// Prove that the given inputs satisfy the circuit
-    pub fn circuit_prove(
+    pub fn circuit_prove<B: Backend>(
         &mut self,
-        api: &mut BarretenbergApi<FfiBackend>,
+        api: &mut BarretenbergApi<B>,
         input_map: InputMap,
     ) -> Result<CircuitProveResponse, BarretenbergError> {
         let expected_return = None;
@@ -193,9 +194,9 @@ impl BarretenbergCircuit {
     }
 
     /// Verify that the given public inputs and proof satisfy the circuit
-    pub fn circuit_verify(
+    pub fn circuit_verify<B: Backend>(
         &mut self,
-        api: &mut BarretenbergApi<FfiBackend>,
+        api: &mut BarretenbergApi<B>,
         prove_response: CircuitProveResponse,
     ) -> Result<CircuitVerifyResponse, BarretenbergError> {
         api.circuit_verify(
