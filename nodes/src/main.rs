@@ -66,6 +66,8 @@ use client::ExpirableBlob;
 use client::encode_wrap_forwarder_input;
 use client::encode_forwarder_calldata;
 use client::encode_unwrap_forwarder_input;
+use client::ConsumedResourcePublic;
+use barretenberg_rs::Backend;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -413,10 +415,11 @@ impl ClientState {
     }
 }
 
-fn add_shielded_input(
+fn add_shielded_input<B: Backend>(
+    api: &mut BarretenbergApi<B>,
     spending_key: ExtendedSpendingKey,
     note: Resource,
-) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance) {
+) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
     // The value info
     let mut value_info = ValueInfo {
         auth_pk: [0u8; _],
@@ -450,7 +453,7 @@ fn add_shielded_input(
         nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
         cm_merkle_path: MerklePath {
             path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
-            depth: MAX_TREE_DEPTH as u32,
+            depth: MAX_TREE_DEPTH,
         },
     };
     let resource_commitment = compliance_witness.resource.commitment();
@@ -463,7 +466,13 @@ fn add_shielded_input(
         is_consumed: logic_witness.is_consumed,
         app_data: AppData::default(),
     };
-    (logic_witness, compliance_witness, logic_instance)
+    let commitment_tree_root = compliance_witness.cm_merkle_path.root(api, resource_commitment);
+    let compliance_public = ConsumedResourcePublic {
+        resource_nullifier,
+        resource_logic_ref: note.logic_ref,
+        commitment_tree_root,
+    };
+    (logic_witness, compliance_witness, logic_instance, compliance_public)
 }
 
 fn add_transparent_input(
@@ -539,7 +548,7 @@ fn add_transparent_input(
         nf_key: client::NullifierKey { bytes: nullifier_key.0 },
         cm_merkle_path: MerklePath {
             path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
-            depth: MAX_TREE_DEPTH as u32,
+            depth: MAX_TREE_DEPTH,
         },
     };
     // Encode forwarder calldata
@@ -841,7 +850,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                             continue;
                         }
                         value_acc += note.quantity;
-                        let (logic_witness, compliance_witness, logic_instance) = add_shielded_input(spending_key.clone(), note.clone());
+                        let (logic_witness, compliance_witness, logic_instance, compliance_public) =
+                            add_shielded_input(&mut api, spending_key.clone(), note.clone());
                         consumed_data[usize::from(consumed_count)] = compliance_witness;
                         consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
                         consumed_count += 1;

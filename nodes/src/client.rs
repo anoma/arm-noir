@@ -11,6 +11,8 @@ use alloy::primitives::keccak256;
 use sha2::{Sha256, Digest};
 use borsh::{BorshSerialize, BorshDeserialize};
 use acir::AcirField;
+use barretenberg_rs::BarretenbergApi;
+use barretenberg_rs::Backend;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -417,7 +419,46 @@ impl From<TransferAuthWitness> for InputValue {
 #[derive(Clone, Copy, Default)]
 pub struct MerklePath {
     pub path: [(FieldElement, bool); MAX_TREE_DEPTH],
-    pub depth: u32, // Logical length of the path (since the array is statically sized)
+    pub depth: usize, // Logical length of the path (since the array is statically sized)
+}
+
+impl MerklePath {
+    /// Returns the root of the tree corresponding to this path applied to `leaf`.
+    pub fn root<B: Backend>(&self, api: &mut BarretenbergApi<B>, leaf: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
+        let current_root = FieldElement::from_le_bytes_reduce(&leaf);
+        let mut current_root = current_root.to_be_bytes();
+        for i in 0..MAX_TREE_DEPTH {
+            if i < self.depth {
+                let (sibling, leaf_is_on_right) = self.path[i];
+                current_root = if leaf_is_on_right {
+                    api.poseidon2_hash(vec![sibling.to_be_bytes(), current_root])
+                } else {
+                    api.poseidon2_hash(vec![current_root, sibling.to_be_bytes()])
+                }.expect("unable to compute Poseidon hash").hash;
+            }
+        }
+        let mut current_root_bytes = [0u8; DIGEST_BYTES];
+        current_root_bytes.copy_from_slice(&current_root);
+        current_root_bytes
+    }
+
+    /// Returns the logical length of the Merkle path.
+    pub fn len(&self) -> usize {
+        self.depth
+    }
+
+    /// Checks if the Merkle path is empty.
+    pub fn is_empty(&self) -> bool {
+        self.depth == 0
+    }
+
+    /// Creates an empty Merkle path.
+    pub fn empty() -> Self {
+        MerklePath {
+            path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+            depth: 0,
+        }
+    }
 }
 
 impl From<MerklePath> for InputValue {
@@ -458,13 +499,13 @@ impl From<ConsumedResourceWitness> for InputValue {
 }
 
 /// Public information of consumed resources.
-struct ConsumedResourcePublic {
+pub struct ConsumedResourcePublic {
     /// The nullifier of the consumed [Resource].
-    resource_nullifier: [u8; DIGEST_BYTES],
+    pub resource_nullifier: [u8; DIGEST_BYTES],
     /// The logic reference of the consumed [Resource].
-    resource_logic_ref: [u8; DIGEST_BYTES],
+    pub resource_logic_ref: [u8; DIGEST_BYTES],
     /// The root of the Merkle tree where the resource commitment is in.
-    commitment_tree_root: [u8; DIGEST_BYTES],
+    pub commitment_tree_root: [u8; DIGEST_BYTES],
 }
 
 impl From<ConsumedResourcePublic> for InputValue {
@@ -515,7 +556,7 @@ impl From<EmbeddedCurvePoint> for InputValue {
 }
 
 /// The compliance instance contains all public inputs to the compliance proof.
-struct ComplianceInstance {
+pub struct ComplianceInstance {
     /// Public information of consumed resources
     consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
     consumed_count: u32,
