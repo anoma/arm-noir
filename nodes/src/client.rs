@@ -13,6 +13,7 @@ use borsh::{BorshSerialize, BorshDeserialize};
 use acir::AcirField;
 use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::Backend;
+use ark_ec::AffineRepr;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -47,9 +48,9 @@ pub const MAX_CREATED: usize = 4;
 pub const MAX_CONSUMED: usize = 4;
 const MAX_KINDS: u32 = 8;
 pub const MAX_TREE_DEPTH: usize = 32; // Set this to your actual max commitment tree depth
-const CONSUMED_COUNT_BYTES: u32 = 4;
-const CREATED_COUNT_BYTES: u32 = 4;
-const BASE_FIELD_BYTES: u32 = 32;
+const CONSUMED_COUNT_BYTES: usize = 4;
+const CREATED_COUNT_BYTES: usize = 4;
+const BASE_FIELD_BYTES: usize = 32;
 const QUANTITY_BYTES: usize = 16;
 const RESOURCE_BYTES: usize = 6*DIGEST_BYTES + QUANTITY_BYTES + 1;
 const RCM_BYTES: usize = PRF_EXPAND_PERSONALIZATION_LEN + 1 + 2 * DIGEST_BYTES;
@@ -63,7 +64,7 @@ const NONCE_INDEX_BYTES: usize = 4;
 const NONCE_PREIMAGE_LEN: usize = NONCE_DERIVATION_PERSONALIZATION_LEN + NONCE_INDEX_BYTES + DIGEST_BYTES;
 const PAYLOAD_LEN_BYTES: usize = 4;
 const BLOB_LEN_BYTES: u32 = 4;
-//const MAX_COMPLIANCE_DIGEST_BUF_LEN: u32 = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
+const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 
 /// Construct input value from Option type
 fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T>, T: Default {
@@ -249,6 +250,23 @@ impl Resource {
         }
         assert_eq!(offset, count * DIGEST_BYTES, "nullifier concatenation malformed");
         Sha256::digest(&hash_input[..offset]).into()
+    }
+
+    /// Compute the kind of the resource
+    pub fn kind<B: Backend>(&self, api: &mut BarretenbergApi<B>) -> EmbeddedCurvePoint {
+        // Concatenate the logic_ref and label_ref
+        let logic_ref = FieldElement::from_le_bytes_reduce(&self.logic_ref);
+        let label_ref = FieldElement::from_le_bytes_reduce(&self.label_ref);
+        // Hash to a curve point
+        let point = api.pedersen_commit(vec![
+            logic_ref.to_be_bytes().to_vec(),
+            label_ref.to_be_bytes().to_vec(),
+        ], 0).expect("unable to compute Pedersen commitment").point;
+        // Convert back to the EmbeddedCurvePoint type
+        EmbeddedCurvePoint {
+            x: FieldElement::from_be_bytes_reduce(&point.x),
+            y: FieldElement::from_be_bytes_reduce(&point.y),
+        }
     }
 }
 
@@ -439,6 +457,7 @@ impl MerklePath {
         }
         let mut current_root_bytes = [0u8; DIGEST_BYTES];
         current_root_bytes.copy_from_slice(&current_root);
+        current_root_bytes.reverse();
         current_root_bytes
     }
 
@@ -542,9 +561,24 @@ impl From<CreatedResourcePublic> for InputValue {
 /// A point on the embedded elliptic curve
 /// By definition, the base field of the embedded curve is the scalar field of the proof system curve, i.e the Noir Field.
 /// x and y denotes the Weierstrass coordinates of the point.
+#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
 pub struct EmbeddedCurvePoint {
     pub x: FieldElement,
     pub y: FieldElement,
+}
+
+impl EmbeddedCurvePoint {
+    /// True if this point is the point at infinity
+    pub fn is_infinite(&self) -> bool {
+        self.x.is_zero() && self.y.is_zero()
+    }
+
+    pub fn generator() -> Self {
+        let generator = ark_grumpkin::Affine::generator();
+        let generator_x = FieldElement::from_repr(generator.x().unwrap());
+        let generator_y = FieldElement::from_repr(generator.y().unwrap());
+        Self { x: generator_x, y: generator_y }
+    }
 }
 
 impl From<EmbeddedCurvePoint> for InputValue {
@@ -560,13 +594,13 @@ impl From<EmbeddedCurvePoint> for InputValue {
 /// The compliance instance contains all public inputs to the compliance proof.
 pub struct ComplianceInstance {
     /// Public information of consumed resources
-    consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
-    consumed_count: u32,
+    pub consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
+    pub consumed_count: u32,
     /// Public information of created resources
-    created_publics: [CreatedResourcePublic; MAX_CREATED],
-    created_count: u32,
+    pub created_publics: [CreatedResourcePublic; MAX_CREATED],
+    pub created_count: u32,
     /// The delta coordinates of the created resource
-    delta: EmbeddedCurvePoint,
+    pub delta: EmbeddedCurvePoint,
 }
 
 impl From<ComplianceInstance> for InputValue {
@@ -579,6 +613,34 @@ impl From<ComplianceInstance> for InputValue {
         map.insert("created_count".to_string(), InputValue::Field(res.created_count.into()));
         map.insert("delta".to_string(), res.delta.into());
         InputValue::Struct(map)
+    }
+}
+
+impl ComplianceInstance {
+    pub fn digest(&self) -> FieldElement {
+        let mut buf = [0; MAX_COMPLIANCE_DIGEST_BUF_LEN];
+        let mut buf_len = 0;
+        let consumed_count_bytes = u32::from(self.consumed_count).to_le_bytes();
+        write_bytes(&mut buf, &mut buf_len, &consumed_count_bytes);
+        for consumed_public in self.consumed_publics {
+            write_bytes(&mut buf, &mut buf_len, &consumed_public.resource_nullifier);
+            write_bytes(&mut buf, &mut buf_len, &consumed_public.resource_logic_ref);
+            write_bytes(&mut buf, &mut buf_len, &consumed_public.commitment_tree_root);
+        }
+
+        let created_count_bytes = u32::from(self.created_count).to_le_bytes();
+        write_bytes(&mut buf, &mut buf_len, &created_count_bytes);
+        for created_public in self.created_publics {
+            write_bytes(&mut buf, &mut buf_len, &created_public.resource_commitment);
+            write_bytes(&mut buf, &mut buf_len, &created_public.resource_logic_ref);
+        }
+
+        assert!(!self.delta.is_infinite());
+        write_bytes(&mut buf, &mut buf_len, &self.delta.x.to_le_bytes());
+        write_bytes(&mut buf, &mut buf_len, &self.delta.y.to_le_bytes());
+        
+        assert_eq!(buf_len, MAX_COMPLIANCE_DIGEST_BUF_LEN, "compliance instance digest pre-image malformed");
+        FieldElement::from_le_bytes_reduce(keccak256(buf).as_slice())
     }
 }
 

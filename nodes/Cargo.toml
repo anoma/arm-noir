@@ -29,3 +29,5 @@ alloy-signer = "2.1.1"
 k256 = { version = "0.13.4", features = ["ecdh"] }
 ark-bn254 = "0.6.0"
 ark-ff = "0.6.0"
+ark-grumpkin = "0.6.0"
+ark-ec = "0.6.0"

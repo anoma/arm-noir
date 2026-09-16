@@ -70,6 +70,9 @@ use client::ConsumedResourcePublic;
 use barretenberg_rs::Backend;
 use alloy::primitives::hex;
 use client::CreatedResourcePublic;
+use bn254_blackbox_solver::multi_scalar_mul;
+use client::ComplianceInstance;
+use client::EmbeddedCurvePoint;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -419,7 +422,7 @@ impl ClientState {
     }
 }
 
-fn add_shielded_input<B: Backend>(
+fn build_shielded_input<B: Backend>(
     api: &mut BarretenbergApi<B>,
     spending_key: ExtendedSpendingKey,
     note: Resource,
@@ -479,7 +482,7 @@ fn add_shielded_input<B: Backend>(
     (logic_witness, compliance_witness, logic_instance, compliance_public)
 }
 
-fn add_transparent_input(
+fn build_transparent_input(
     rng: &mut impl Rng,
     logic_ref: [u8; DIGEST_BYTES],
     addr: Address,
@@ -596,7 +599,7 @@ fn add_transparent_input(
     (logic_witness, compliance_witness, logic_instance, compliance_public)
 }
 
-fn add_shielded_output(
+fn build_shielded_output(
     rng: &mut impl Rng,
     logic_ref: [u8; DIGEST_BYTES],
     payment_addr: &PaymentAddress,
@@ -696,7 +699,7 @@ fn add_shielded_output(
     (witness, logic_instance, compliance_public)
 }
 
-fn add_transparent_output(
+fn build_transparent_output(
     rng: &mut impl Rng,
     logic_ref: [u8; DIGEST_BYTES],
     addr: &Address,
@@ -839,12 +842,14 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let mut consumed_nullifiers = [[0; DIGEST_BYTES]; MAX_CONSUMED];
             // The consumed data
             let mut consumed_data = [ConsumedResourceWitness::default(); MAX_CONSUMED];
-            let mut consumed_public = [ConsumedResourcePublic::default(); MAX_CONSUMED];
+            let mut consumed_publics = [ConsumedResourcePublic::default(); MAX_CONSUMED];
             let mut consumed_count = 0u8;
             // The created data
             let mut created_resources = [Resource::default(); MAX_CREATED];
-            let mut created_public = [CreatedResourcePublic::default(); MAX_CREATED];
+            let mut created_publics = [CreatedResourcePublic::default(); MAX_CREATED];
             let mut created_count = 0u8;
+            // Quantity delta
+            let mut delta_map = BTreeMap::new();
             // Data about transaction change
             let mut change = None;
             // Add transaction inputs
@@ -870,10 +875,10 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         }
                         value_acc += note.quantity;
                         let (logic_witness, compliance_witness, logic_instance, compliance_public) =
-                            add_shielded_input(&mut api, spending_key.clone(), note.clone());
+                            build_shielded_input(&mut api, spending_key.clone(), note.clone());
                         consumed_data[usize::from(consumed_count)] = compliance_witness;
                         consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
-                        consumed_public[usize::from(consumed_count)] = compliance_public;
+                        consumed_publics[usize::from(consumed_count)] = compliance_public;
                         consumed_count += 1;
                         let mut input_map = InputMap::new();
                         input_map.insert("witness".to_string(), logic_witness.into());
@@ -882,6 +887,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                         println!("Shielded input verification response: {:?}", verify_response);
                         assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+                        // Accumulate delta
+                        *delta_map.entry(compliance_witness.resource.kind(&mut api)).or_insert(0) += compliance_witness.resource.quantity as i128;
                     }
                 }
                 // Send the change back to the sender if there's any
@@ -890,7 +897,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                let (logic_witness, compliance_witness, logic_instance, compliance_public) = add_transparent_input(
+                let (logic_witness, compliance_witness, logic_instance, compliance_public) = build_transparent_input(
                     &mut rng,
                     logic_ref,
                     addr,
@@ -899,7 +906,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 );
                 consumed_data[usize::from(consumed_count)] = compliance_witness;
                 consumed_nullifiers[usize::from(consumed_count)] = logic_instance.tag;
-                consumed_public[usize::from(consumed_count)] = compliance_public;
+                consumed_publics[usize::from(consumed_count)] = compliance_public;
                 consumed_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), logic_witness.into());
@@ -908,12 +915,14 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 let verify_response = logic_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
                 println!("Transparent input verification response: {:?}", verify_response);
                 assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+                // Accumulate delta
+                *delta_map.entry(compliance_witness.resource.kind(&mut api)).or_insert(0) += compliance_witness.resource.quantity as i128;
             }
             // Compute the digest of the consumed nullifiers
             let consumed_nullifiers_digest = Resource::hash_nullifiers(consumed_nullifiers, consumed_count.into());
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
-                let (witness, logic_instance, compliance_public) = add_shielded_output(
+                let (witness, logic_instance, compliance_public) = build_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -922,9 +931,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     consumed_nullifiers_digest,
                     created_count,
                 );
+                // Accumulate delta
+                *delta_map.entry(witness.resource.kind(&mut api)).or_insert(0) -= witness.resource.quantity as i128;
                 // Compliance witness
                 created_resources[usize::from(created_count)] = witness.resource;
-                created_public[usize::from(created_count)] = compliance_public;
+                created_publics[usize::from(created_count)] = compliance_public;
                 created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
@@ -936,7 +947,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                let (witness, logic_instance, compliance_public) = add_shielded_output(
+                let (witness, logic_instance, compliance_public) = build_shielded_output(
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -945,9 +956,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     consumed_nullifiers_digest,
                     created_count,
                 );
+                // Accumulate delta
+                *delta_map.entry(witness.resource.kind(&mut api)).or_insert(0) -= witness.resource.quantity as i128;
                 // Compliance witness
                 created_resources[usize::from(created_count)] = witness.resource;
-                created_public[usize::from(created_count)] = compliance_public;
+                created_publics[usize::from(created_count)] = compliance_public;
                 created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
@@ -958,7 +971,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
-                let (witness, logic_instance, compliance_public) = add_transparent_output(
+                let (witness, logic_instance, compliance_public) = build_transparent_output(
                     &mut rng,
                     logic_ref,
                     &addr,
@@ -967,8 +980,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     consumed_nullifiers_digest,
                     created_count,
                 );
+                // Accumulate delta
+                *delta_map.entry(witness.resource.kind(&mut api)).or_insert(0) -= witness.resource.quantity as i128;
                 // Compliance witness
                 created_resources[usize::from(created_count)] = witness.resource;
+                created_publics[usize::from(created_count)] = compliance_public;
                 created_count += 1;
                 let mut input_map = InputMap::new();
                 input_map.insert("witness".to_string(), witness.into());
@@ -984,8 +1000,37 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 consumed_count: consumed_count.into(),
                 created_resources,
                 created_count: created_count.into(),
-                ephemeral_root: [0u8; _],
+                ephemeral_root: INITIAL_ROOT,
                 rcv: EmbeddedCurveScalar::random(&mut rng),
+            };
+            // Sum the deltas
+            let mut points = vec![FieldElement::zero(); delta_map.len() * 2];
+            let mut scalars_lo = vec![FieldElement::zero(); delta_map.len()];
+            let mut scalars_hi = vec![FieldElement::zero(); delta_map.len()];
+            for (idx, (point, magnitude)) in delta_map.into_iter().enumerate() {
+                points[2*idx] = point.x;
+                if magnitude >= 0 {
+                    points[2*idx + 1] = point.y;
+                } else {
+                    points[2*idx + 1] = -point.y;
+                }
+                scalars_lo[idx] = magnitude.abs().into();
+            }
+            // Add the value commitment randomness
+            let generator = EmbeddedCurvePoint::generator();
+            points.push(generator.x);
+            points.push(generator.y);
+            scalars_lo.push(compliance_witness.rcv.lo);
+            scalars_hi.push(compliance_witness.rcv.hi);
+            // Compute the delta from all inputs and outputs
+            let delta = multi_scalar_mul(&points, &scalars_lo, &scalars_hi)
+                .expect("unable to do multi-scalar multiplication");
+            let compliance_instance = ComplianceInstance {
+                consumed_publics,
+                consumed_count: u32::from(consumed_count),
+                created_publics,
+                created_count: u32::from(created_count),
+                delta: EmbeddedCurvePoint { x: delta.0, y: delta.1 },
             };
             // Load up the aggregation circuit from disk
             let compliance_program_artifact_path = PathBuf::from(COMPLIANCE_CIRCUIT_PATH);
@@ -997,6 +1042,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let prove_response = compliance_circuit.circuit_prove(&mut api, input_map).unwrap();
             let verify_response = compliance_circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
             println!("Compliance verification response: {:?}", verify_response);
+            assert_eq!(prove_response.public_inputs[0].clone(), compliance_instance.digest().to_be_bytes());
             // Finally update the state of the pool
             for i in 0..consumed_count {
                 pool_state.nullifier_queue.push(consumed_nullifiers[usize::from(i)]);
