@@ -1001,8 +1001,9 @@ impl TransactionBuilder {
         let mut scalars_lo = vec![FieldElement::zero(); self.delta_map.len()];
         let mut scalars_hi = vec![FieldElement::zero(); self.delta_map.len()];
         for (idx, (point, quantity)) in self.delta_map.iter().enumerate() {
-            points[2*idx] = point.x;
-            points[2*idx + 1] = if *quantity >= SignMagnitude::default() { point.y } else { -point.y };
+            let signed_point = if *quantity >= SignMagnitude::default() { *point } else { -*point };
+            points[2*idx] = signed_point.x;
+            points[2*idx + 1] = signed_point.y;
             scalars_lo[idx] = quantity.magnitude.into();
         }
         // Add the value commitment randomness

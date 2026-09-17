@@ -14,6 +14,7 @@ use acir::AcirField;
 use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::Backend;
 use ark_ec::AffineRepr;
+use std::ops::Neg;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -561,7 +562,7 @@ impl From<CreatedResourcePublic> for InputValue {
 /// A point on the embedded elliptic curve
 /// By definition, the base field of the embedded curve is the scalar field of the proof system curve, i.e the Noir Field.
 /// x and y denotes the Weierstrass coordinates of the point.
-#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
+#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug, Copy, Clone)]
 pub struct EmbeddedCurvePoint {
     pub x: FieldElement,
     pub y: FieldElement,
@@ -578,6 +579,14 @@ impl EmbeddedCurvePoint {
         let generator_x = FieldElement::from_repr(generator.x().unwrap());
         let generator_y = FieldElement::from_repr(generator.y().unwrap());
         Self { x: generator_x, y: generator_y }
+    }
+}
+
+impl Neg for EmbeddedCurvePoint {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self { x: self.x, y: -self.y }
     }
 }
 
