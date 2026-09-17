@@ -480,19 +480,31 @@ impl TransactionBuilder {
         }
     }
 
+    fn build_label_info(forwarder_addr: &Address, token_addr: &Address) -> (LabelInfo, [u8; DIGEST_BYTES]) {
+        // Compute the label reference
+        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
+        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(forwarder_addr.as_slice());
+        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(token_addr.as_slice());
+        let label_ref = keccak256(label_ref_bytes);
+        // The label info
+        let label_info = LabelInfo {
+            forwarder_addr: forwarder_addr.into_array(),
+            erc20_token_addr: token_addr.into_array(),
+        };
+        (label_info, label_ref.0)
+    }
+
     fn build_shielded_input<B: Backend>(
         api: &mut BarretenbergApi<B>,
         spending_key: ExtendedSpendingKey,
         note: Resource,
     ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
         // The value info
-        let mut value_info = ValueInfo {
-            auth_pk: [0u8; _],
-            encryption_pk: [0u8; _],
-        };
         let payment_addr = spending_key.to_viewing_key().to_payment_address();
-        value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
-        value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
+        let value_info = ValueInfo {
+            auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            encryption_pk: payment_addr.public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+        };
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
         // Sign over the resource
@@ -548,15 +560,7 @@ impl TransactionBuilder {
         amount: u128,
     ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
         // Compute the label reference
-        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
-        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
-        let label_ref = keccak256(label_ref_bytes);
-        // The label info
-        let label_info = LabelInfo {
-            forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-            erc20_token_addr: erc20_token_addr.into_array(),
-        };
+        let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
         let mut rand_seed = [0u8; DIGEST_BYTES];
         rng.fill(&mut rand_seed);
@@ -575,7 +579,7 @@ impl TransactionBuilder {
             nonce,
             quantity: amount.into(),
             logic_ref,
-            label_ref: label_ref.0,
+            label_ref,
             nk_commitment: nullifier_key.commit().0,
         };
         // The permit info
@@ -667,25 +671,15 @@ impl TransactionBuilder {
         created_count: u8,
     ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
         // Compute the label reference
-        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
-        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
-        let label_ref = keccak256(label_ref_bytes);
-        // The label info
-        let label_info = LabelInfo {
-            forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-            erc20_token_addr: erc20_token_addr.into_array(),
-        };
+        let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
         let mut rand_seed = [0u8; DIGEST_BYTES];
         rng.fill(&mut rand_seed);
         // The value info
-        let mut value_info = ValueInfo {
-            auth_pk: [0u8; _],
-            encryption_pk: [0u8; _],
+        let value_info = ValueInfo {
+            auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            encryption_pk: payment_addr.public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
         };
-        value_info.auth_pk.copy_from_slice(&payment_addr.verifying_key.to_encoded_point(false).as_bytes());
-        value_info.encryption_pk.copy_from_slice(&payment_addr.public_key.to_encoded_point(false).as_bytes());
         // Calculate persistent value reference
         let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
         value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
@@ -701,7 +695,7 @@ impl TransactionBuilder {
             nonce,
             quantity: amount.into(),
             logic_ref,
-            label_ref: label_ref.0,
+            label_ref,
             nk_commitment: payment_addr.nullifier_key_commitment.0,
         };
         // The action root
@@ -767,15 +761,7 @@ impl TransactionBuilder {
         created_count: u8,
     ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
         // Compute the label reference
-        let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-        label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
-        label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
-        let label_ref = keccak256(label_ref_bytes);
-        // The label info
-        let label_info = LabelInfo {
-            forwarder_addr: ERC20_FORWARDER_ADDRESS.into_array(),
-            erc20_token_addr: erc20_token_addr.into_array(),
-        };
+        let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
         let mut rand_seed = [0u8; DIGEST_BYTES];
         rng.fill(&mut rand_seed);
@@ -794,7 +780,7 @@ impl TransactionBuilder {
             nonce,
             quantity: amount.into(),
             logic_ref,
-            label_ref: label_ref.0,
+            label_ref,
             nk_commitment: nullifier_key.commit().0,
         };
         // The forwarder info
@@ -1106,7 +1092,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             // Finally build the transaction
             let transaction = builder.build(&mut api, compliance_witness, compliance_instance);
-            println!("Transaction built: {:?}", transaction);
             // Save the updated state
             let state_bytes = borsh::to_vec(&pool_state)?;
             std::fs::write(pool_state_path, state_bytes)?;
