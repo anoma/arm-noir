@@ -73,6 +73,8 @@ use client::CreatedResourcePublic;
 use bn254_blackbox_solver::multi_scalar_mul;
 use client::ComplianceInstance;
 use client::EmbeddedCurvePoint;
+use std::ops::{Add, Sub, AddAssign, SubAssign};
+use std::cmp::Ordering;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -422,6 +424,103 @@ impl ClientState {
     }
 }
 
+// Representation of a number as sign and magnitude
+#[derive(Clone, Copy, Debug)]
+struct SignMagnitude<T> {
+    // False is a plus sign, true is a negative sign
+    sign: bool,
+    // Magnitude of the number
+    magnitude: T,
+}
+
+impl<T> From<T> for SignMagnitude<T> {
+    fn from(magnitude: T) -> Self {
+        Self { sign: false, magnitude }
+    }
+}
+
+impl<T: Default> Default for SignMagnitude<T> {
+    fn default() -> Self {
+        Self { sign: false, magnitude: T::default() }
+    }
+}
+
+impl<U, T: Add<Output = U> + Sub<Output = U> + Ord> Add for SignMagnitude<T> {
+    type Output = SignMagnitude<U>;
+    
+    fn add(self, rhs: Self) -> Self::Output {
+        if self.sign == rhs.sign {
+            SignMagnitude::<U> { sign: self.sign, magnitude: self.magnitude + rhs.magnitude }
+        } else if self.magnitude >= rhs.magnitude {
+            SignMagnitude::<U> { sign: self.sign, magnitude: self.magnitude - rhs.magnitude }
+        } else {
+            SignMagnitude::<U> { sign: rhs.sign, magnitude: rhs.magnitude - self.magnitude }
+        }
+    }
+}
+
+impl<T: AddAssign + SubAssign + Ord> AddAssign for SignMagnitude<T> {
+    fn add_assign(&mut self, mut rhs: Self) {
+        if self.sign == rhs.sign {
+            self.magnitude += rhs.magnitude;
+        } else if self.magnitude >= rhs.magnitude {
+            self.magnitude -= rhs.magnitude;
+        } else {
+            std::mem::swap(self, &mut rhs);
+            self.magnitude -= rhs.magnitude;
+        }
+    }
+}
+
+impl<U, T: Add<Output = U> + Sub<Output = U> + Ord> Sub for SignMagnitude<T> {
+    type Output = SignMagnitude<U>;
+    
+    fn sub(self, mut rhs: Self) -> Self::Output {
+        rhs.sign = !rhs.sign;
+        self + rhs
+    }
+}
+
+impl<T: AddAssign + SubAssign + Ord> SubAssign for SignMagnitude<T> {
+    fn sub_assign(&mut self, mut rhs: Self) {
+        rhs.sign = !rhs.sign;
+        *self += rhs
+    }
+}
+
+impl<T: Default + Eq> PartialEq for SignMagnitude<T> {
+    fn eq(&self, other: &Self) -> bool {
+        let zero = T::default();
+        let is_identical = self.sign == other.sign && self.magnitude == other.magnitude;
+        let both_zero = self.magnitude == zero && other.magnitude == zero;
+        is_identical || both_zero
+    }
+}
+
+impl<T: Default + Eq> Eq for SignMagnitude<T> {}
+
+impl<T: Default + Eq + Ord> Ord for SignMagnitude<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if *self == *other {
+            Ordering::Equal
+        } else if self.sign == other.sign && !self.sign {
+            self.magnitude.cmp(&other.magnitude)
+        } else if self.sign == other.sign {
+            self.magnitude.cmp(&other.magnitude).reverse()
+        } else if !self.sign {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        }
+    }
+}
+
+impl<T: Default + Eq + Ord> PartialOrd for SignMagnitude<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug)]
 struct Transaction {
     logic_instances: Vec<(ResourceLogicInstance, Vec<Vec<u8>>)>,
@@ -445,7 +544,7 @@ struct TransactionBuilder {
     created_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
     created_count: u8,
     // Quantity delta
-    delta_map: BTreeMap<EmbeddedCurvePoint, i128>,
+    delta_map: BTreeMap<EmbeddedCurvePoint, SignMagnitude<u128>>,
     // Circuits required for building proofs
     logic_circuit: BarretenbergCircuit,
     compliance_circuit: BarretenbergCircuit,
@@ -859,7 +958,7 @@ impl TransactionBuilder {
         println!("Input verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
         // Accumulate delta
-        *self.delta_map.entry(compliance_witness.resource.kind(api)).or_insert(0) += compliance_witness.resource.quantity as i128;
+        *self.delta_map.entry(compliance_witness.resource.kind(api)).or_default() += SignMagnitude::from(compliance_witness.resource.quantity);
         self.consumed_count += 1;
     }
 
@@ -871,7 +970,7 @@ impl TransactionBuilder {
         compliance_public: CreatedResourcePublic,
     ) {
         // Accumulate delta
-        *self.delta_map.entry(witness.resource.kind(api)).or_insert(0) -= witness.resource.quantity as i128;
+        *self.delta_map.entry(witness.resource.kind(api)).or_default() -= SignMagnitude::from(witness.resource.quantity);
         // Compliance witness
         self.created_resources[usize::from(self.created_count)] = witness.resource;
         self.created_publics[usize::from(self.created_count)] = compliance_public;
@@ -901,14 +1000,10 @@ impl TransactionBuilder {
         let mut points = vec![FieldElement::zero(); self.delta_map.len() * 2];
         let mut scalars_lo = vec![FieldElement::zero(); self.delta_map.len()];
         let mut scalars_hi = vec![FieldElement::zero(); self.delta_map.len()];
-        for (idx, (point, magnitude)) in self.delta_map.iter().enumerate() {
+        for (idx, (point, quantity)) in self.delta_map.iter().enumerate() {
             points[2*idx] = point.x;
-            if *magnitude >= 0 {
-                points[2*idx + 1] = point.y;
-            } else {
-                points[2*idx + 1] = -point.y;
-            }
-            scalars_lo[idx] = magnitude.abs().into();
+            points[2*idx + 1] = if *quantity >= SignMagnitude::default() { point.y } else { -point.y };
+            scalars_lo[idx] = quantity.magnitude.into();
         }
         // Add the value commitment randomness
         let generator = EmbeddedCurvePoint::generator();
