@@ -15,6 +15,9 @@ use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::Backend;
 use ark_ec::AffineRepr;
 use std::ops::Neg;
+use ark_ff::BigInteger;
+use std::ops::Mul;
+use ark_ec::CurveGroup;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -66,6 +69,8 @@ const NONCE_PREIMAGE_LEN: usize = NONCE_DERIVATION_PERSONALIZATION_LEN + NONCE_I
 const PAYLOAD_LEN_BYTES: usize = 4;
 const BLOB_LEN_BYTES: u32 = 4;
 const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
+pub const ENCRYPTION_NONCE_LEN: usize = 12;
+const RESOURCE_WITH_LABEL_BYTES: usize = RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
 
 /// Construct input value from Option type
 fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T>, T: Default {
@@ -271,6 +276,31 @@ impl Resource {
     }
 }
 
+/// The struct encoded in the resource payload for persistent created resources.
+pub struct ResourceWithLabel {
+    pub resource: Resource,
+    /// Address of the forwarder contract for this resource.
+    pub forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
+    /// Address of the wrapped token within this resource (e.g. USDC).
+    pub erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
+}
+
+impl ResourceWithLabel {
+    pub fn to_bytes(self) -> [u8; RESOURCE_WITH_LABEL_BYTES] {
+        // Concatenate all the components of this resource
+        let mut bytes = [0; RESOURCE_WITH_LABEL_BYTES];
+        let mut offset: usize = 0;
+        // Write the resource bytes
+        write_bytes(&mut bytes, &mut offset, &self.resource.to_bytes());
+        // Write the forwarder address bytes
+        write_bytes(&mut bytes, &mut offset, &self.forwarder_addr);
+        // Write the token address bytes
+        write_bytes(&mut bytes, &mut offset, &self.erc20_token_addr);
+        assert_eq!(offset, RESOURCE_WITH_LABEL_BYTES, "resource with label bytes malformed");
+        bytes
+    }
+}
+
 /// Nullifier key
 #[derive(Default, Clone, Copy)]
 pub struct NullifierKey {
@@ -291,14 +321,14 @@ pub struct ValueInfo {
     /// The authorization verifying key corresponds to the resource.value.owner
     pub auth_pk: [u8; MAX_AUTH_PK_LEN],
     /// Public key. Obtain from the receiver for persistent resource_ciphertext
-    pub encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
+    pub encryption_pk: EmbeddedCurvePoint,
 }
 
 impl Default for ValueInfo {
     fn default() -> Self {
         Self {
             auth_pk: [0; _],
-            encryption_pk: [0; _],
+            encryption_pk: EmbeddedCurvePoint::point_at_infinity(),
         }
     }
 }
@@ -308,7 +338,7 @@ impl From<ValueInfo> for InputValue {
     fn from(res: ValueInfo) -> Self {
         let mut map = InputMap::new();
         map.insert("auth_pk".to_string(), Array(res.auth_pk).into());
-        map.insert("encryption_pk".to_string(), Array(res.encryption_pk).into());
+        map.insert("encryption_pk".to_string(), res.encryption_pk.into());
         InputValue::Struct(map)
     }
 }
@@ -403,11 +433,7 @@ pub struct TransferAuthWitness {
     /// A consumed persistent resource requires an authorization signature
     pub auth_sig: Option<[u8; MAX_AUTH_SIG_LEN]>,
     /// See EncryptionInfo struct.
-    pub resource_ciphertext: Option<[u8; MAX_RESOURCE_CIPHERTEXT_LEN]>,
-    pub resource_ciphertext_len: u32,
-    /// The discovery ciphertext for the resource
-    pub discovery_ciphertext: Option<[u8; MAX_DISCOVERY_CIPHERTEXT_LEN]>,
-    pub discovery_ciphertext_len: u32,
+    pub encryption_info: Option<EncryptionInfo>,
     /// See LabelInfo struct.
     pub label_info: Option<LabelInfo>,
     /// See ForwarderInfo struct.
@@ -420,16 +446,48 @@ impl From<TransferAuthWitness> for InputValue {
         let mut map = InputMap::new();
         map.insert("resource".to_string(), res.resource.into());
         map.insert("is_consumed".to_string(), InputValue::Field(FieldElement::from(res.is_consumed)));
-        map.insert("resource_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.resource_ciphertext_len)));
-        map.insert("discovery_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.discovery_ciphertext_len)));
         map.insert("action_root".to_string(), Array(res.action_root).into());
         map.insert("auth_sig".to_string(), option_to_input_value(res.auth_sig.map(Array)));
-        map.insert("resource_ciphertext".to_string(), option_to_input_value(res.resource_ciphertext.map(Array)));
-        map.insert("discovery_ciphertext".to_string(), option_to_input_value(res.discovery_ciphertext.map(Array)));
         map.insert("nullifier_key".to_string(), option_to_input_value(res.nullifier_key));
         map.insert("value_info".to_string(), option_to_input_value(res.value_info));
+        map.insert("encryption_info".to_string(), option_to_input_value(res.encryption_info));
         map.insert("label_info".to_string(), option_to_input_value(res.label_info));
         map.insert("forwarder_info".to_string(), option_to_input_value(res.forwarder_info));
+        InputValue::Struct(map)
+    }
+}
+
+/// The EncryptionInfo struct holds information about the encryption keys for the
+/// recipient/sender of a resource in a transaction.
+pub struct EncryptionInfo {
+    /// Secret key. randomly generated for persistent resource_ciphertext
+    pub sender_sk: EmbeddedCurveScalar,
+    /// randomly generated for persistent resource_ciphertext(12 bytes)
+    pub encryption_nonce: [u8; ENCRYPTION_NONCE_LEN],
+    /// The discovery ciphertext for the resource
+    pub discovery_ciphertext: [u8; MAX_DISCOVERY_CIPHERTEXT_LEN],
+    pub discovery_ciphertext_len: u32,
+}
+
+impl Default for EncryptionInfo {
+    fn default() -> Self {
+        Self {
+            sender_sk: EmbeddedCurveScalar::zero(),
+            encryption_nonce: [0; _],
+            discovery_ciphertext: [0; _],
+            discovery_ciphertext_len: 0,
+        }
+    }
+}
+
+impl From<EncryptionInfo> for InputValue {
+    /// Convert the serializable proof struct into an InputMap for the ABI.
+    fn from(res: EncryptionInfo) -> Self {
+        let mut map = InputMap::new();
+        map.insert("sender_sk".to_string(), res.sender_sk.into());
+        map.insert("encryption_nonce".to_string(), Array(res.encryption_nonce).into());
+        map.insert("discovery_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.discovery_ciphertext_len)));
+        map.insert("discovery_ciphertext".to_string(), Array(res.discovery_ciphertext).into());
         InputValue::Struct(map)
     }
 }
@@ -574,11 +632,32 @@ impl EmbeddedCurvePoint {
         self.x.is_zero() && self.y.is_zero()
     }
 
+    /// Returns the curve's generator point.
     pub fn generator() -> Self {
+        // Generator point for the grumpkin curve (y^2 = x^3 - 17)
         let generator = ark_grumpkin::Affine::generator();
         let generator_x = FieldElement::from_repr(generator.x().unwrap());
         let generator_y = FieldElement::from_repr(generator.y().unwrap());
         Self { x: generator_x, y: generator_y }
+    }
+
+    /// Returns the null element of the curve; 'the point at infinity'
+    pub fn point_at_infinity() -> Self {
+        EmbeddedCurvePoint { x: FieldElement::zero(), y: FieldElement::zero() }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 64] {
+        let mut combined_bytes = [0u8; 64];
+        combined_bytes[..32].copy_from_slice(&self.x.to_le_bytes());
+        combined_bytes[32..].copy_from_slice(&self.y.to_le_bytes());
+        combined_bytes
+    }
+
+    pub fn from_bytes(bigint: &[u8]) -> Self {
+        Self {
+            x: FieldElement::from_le_bytes_reduce(&bigint[..32]),
+            y: FieldElement::from_le_bytes_reduce(&bigint[32..]),
+        }
     }
 }
 
@@ -597,6 +676,36 @@ impl From<EmbeddedCurvePoint> for InputValue {
         map.insert("x".to_string(), InputValue::Field(res.x.into()));
         map.insert("y".to_string(), InputValue::Field(res.y.into()));
         InputValue::Struct(map)
+    }
+}
+
+impl From<EmbeddedCurvePoint> for ark_grumpkin::Affine {
+    fn from(point: EmbeddedCurvePoint) -> Self {
+        ark_grumpkin::Affine::new(point.x.into_repr(), point.y.into_repr())
+    }
+}
+
+impl From<ark_grumpkin::Affine> for EmbeddedCurvePoint {
+    fn from(point: ark_grumpkin::Affine) -> Self {
+        Self { x: FieldElement::from_repr(point.x), y: FieldElement::from_repr(point.y) }
+    }
+}
+
+impl Mul<EmbeddedCurveScalar> for EmbeddedCurvePoint {
+    type Output = Self;
+
+    fn mul(self, scalar: EmbeddedCurveScalar) -> Self::Output {
+        // 1. Convert the point to ark_grumpkin::Affine
+        let affine_point: ark_grumpkin::Affine = self.into();
+        
+        // 2. Convert the scalar to ark_grumpkin::Fr
+        let fr_scalar: ark_grumpkin::Fr = scalar.into();
+        
+        // 3. Perform the scalar multiplication (returns a Projective point)
+        let projective_result = affine_point * fr_scalar;
+        
+        // 4. Convert back to Affine, and then to our custom EmbeddedCurvePoint
+        projective_result.into_affine().into()
     }
 }
 
@@ -657,6 +766,7 @@ impl ComplianceInstance {
 /// Scalar for the embedded curve represented as low and high limbs
 /// By definition, the scalar field of the embedded curve is base field of the proving system curve.
 /// It may not fit into a Field element, so it is represented with two Field elements; its low and high limbs.
+#[derive(Clone, Copy, Debug)]
 pub struct EmbeddedCurveScalar {
     pub lo: FieldElement,
     pub hi: FieldElement,
@@ -669,6 +779,24 @@ impl From<EmbeddedCurveScalar> for InputValue {
         map.insert("lo".to_string(), InputValue::Field(res.lo.into()));
         map.insert("hi".to_string(), InputValue::Field(res.hi.into()));
         InputValue::Struct(map)
+    }
+}
+
+impl From<EmbeddedCurveScalar> for ark_grumpkin::Fr {
+    fn from(scalar: EmbeddedCurveScalar) -> Self {
+        // Combine the first 16 bytes (128 bits) of each limb into a single 32-byte array
+        let combined_bytes = scalar.to_bytes();
+        // Construct the Grumpkin scalar from the combined bytes
+        ark_grumpkin::Fr::from_le_bytes_mod_order(&combined_bytes)
+    }
+}
+
+impl From<ark_grumpkin::Fr> for EmbeddedCurveScalar {
+    fn from(scalar: ark_grumpkin::Fr) -> Self {
+        // Convert the Grumpkin scalar to its byte representation
+        let bigint = scalar.into_bigint().to_bytes_le();
+        // Then convert the byte representation to this type
+        Self::from_bytes(&bigint)
     }
 }
 
@@ -685,6 +813,25 @@ impl EmbeddedCurveScalar {
         EmbeddedCurveScalar {
             hi: FieldElement::from_repr(hi.into()),
             lo: FieldElement::from_repr(lo.into()),
+        }
+    }
+    /// Zero scalar
+    pub fn zero() -> Self {
+        Self { lo: FieldElement::zero(), hi: FieldElement::zero() }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        // Combine the first 16 bytes (128 bits) of each limb into a single 32-byte array
+        let mut combined_bytes = [0u8; 32];
+        combined_bytes[..16].copy_from_slice(&self.lo.to_le_bytes()[..16]);
+        combined_bytes[16..].copy_from_slice(&self.hi.to_le_bytes()[..16]);
+        combined_bytes
+    }
+
+    pub fn from_bytes(bigint: &[u8]) -> Self {
+        Self {
+            lo: FieldElement::from_le_bytes_reduce(&bigint[..16]),
+            hi: FieldElement::from_le_bytes_reduce(&bigint[16..]),
         }
     }
 }

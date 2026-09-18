@@ -75,13 +75,17 @@ use client::ComplianceInstance;
 use client::EmbeddedCurvePoint;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
 use std::cmp::Ordering;
+use client::EncryptionInfo;
+use wallet::GRUMPKIN_PUBLIC_KEY_LEN;
+use client::ENCRYPTION_NONCE_LEN;
+use client::ResourceWithLabel;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
 const FORWARDER_ADDR_LEN: usize = 20;
 const ERC20_TOKEN_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
-const MAX_ENCRYPTION_PK_LEN: usize = 65;
+const MAX_ENCRYPTION_PK_LEN: usize = 64;
 const MAX_OUTPUT_LEN: usize = 64;
 pub static INITIAL_ROOT: [u8; 32] =
         hex!("cc1d2f838445db7aec431df9ee8a871f40e7aa5e064fc056633ef8c60fab7b06");
@@ -602,7 +606,7 @@ impl TransactionBuilder {
         let payment_addr = spending_key.to_viewing_key().to_payment_address();
         let value_info = ValueInfo {
             auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
-            encryption_pk: payment_addr.encryption_public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            encryption_pk: payment_addr.encryption_public_key,
         };
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
@@ -615,10 +619,7 @@ impl TransactionBuilder {
             action_root,
             nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
             value_info: Some(value_info),
-            resource_ciphertext: None,
-            resource_ciphertext_len: 0,
-            discovery_ciphertext: None,
-            discovery_ciphertext_len: 0,
+            encryption_info: None,
             label_info: None,
             auth_sig: Some(auth_sig.to_bytes().into()),
             forwarder_info: None,
@@ -702,10 +703,7 @@ impl TransactionBuilder {
             action_root,
             nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
-            resource_ciphertext: None,
-            resource_ciphertext_len: 0,
-            discovery_ciphertext: None,
-            discovery_ciphertext_len: 0,
+            encryption_info: None,
             label_info: Some(label_info),
             auth_sig: None,
             forwarder_info: Some(forwarder_info),
@@ -760,7 +758,8 @@ impl TransactionBuilder {
         (logic_witness, compliance_witness, logic_instance, compliance_public)
     }
 
-    fn build_shielded_output(
+    fn build_shielded_output<B: Backend>(
+        api: &mut BarretenbergApi<B>,
         rng: &mut impl Rng,
         logic_ref: [u8; DIGEST_BYTES],
         payment_addr: &PaymentAddress,
@@ -777,12 +776,12 @@ impl TransactionBuilder {
         // The value info
         let value_info = ValueInfo {
             auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
-            encryption_pk: payment_addr.encryption_public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            encryption_pk: payment_addr.encryption_public_key,
         };
         // Calculate persistent value reference
         let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
         value_ref_bytes[..MAX_AUTH_PK_LEN].copy_from_slice(&value_info.auth_pk);
-        value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk);
+        value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk.to_bytes());
         let value_ref = keccak256(value_ref_bytes);
         // Derive the nonce
         let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
@@ -797,13 +796,40 @@ impl TransactionBuilder {
             label_ref,
             nk_commitment: payment_addr.nullifier_key_commitment.0,
         };
+        let mut payload_plaintext = ResourceWithLabel {
+            resource: resource,
+            forwarder_addr: label_info.forwarder_addr,
+            erc20_token_addr: label_info.erc20_token_addr,
+        }.to_bytes().to_vec();
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
-        //
-        let resource_ciphertext = [0u8; _];
-        let resource_ciphertext_len = 0;
         let discovery_ciphertext = [0u8; _];
         let discovery_ciphertext_len = 0;
+        let mut encryption_nonce = [0u8; ENCRYPTION_NONCE_LEN];
+        rng.try_fill_bytes(&mut encryption_nonce)
+            .expect("Failed to fill encryption nonce");
+        let encryption_info = EncryptionInfo {
+            discovery_ciphertext: discovery_ciphertext,
+            discovery_ciphertext_len,
+            encryption_nonce,
+            sender_sk: EmbeddedCurveScalar::random(rng),
+        };
+        //
+        let shared_point = value_info.encryption_pk * encryption_info.sender_sk;
+        let mut concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
+        concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&value_info.encryption_pk.to_bytes());
+        concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&shared_point.to_bytes());
+        let hash = keccak256(concat);
+        let mut encryption_nonce_padded = [0u8; 16];
+        encryption_nonce_padded[..ENCRYPTION_NONCE_LEN].copy_from_slice(&encryption_nonce);
+        let remainder = 16 - (payload_plaintext.len() % 16);
+        payload_plaintext.resize(payload_plaintext.len() + remainder, remainder as u8);
+        let ciphertext = api.aes_encrypt(&payload_plaintext, &encryption_nonce_padded, &hash[..16], payload_plaintext.len() as u32)
+            .expect("unable to perform AES encryption")
+            .ciphertext;
+        let mut resource_ciphertext = [0u8; _];
+        resource_ciphertext[..ciphertext.len()].copy_from_slice(&ciphertext);
+        let resource_ciphertext_len = ciphertext.len() as u32;
         // The transfer authorization witness
         let witness = TransferAuthWitness {
             resource,
@@ -811,10 +837,7 @@ impl TransactionBuilder {
             action_root,
             nullifier_key: None,
             value_info: Some(value_info),
-            resource_ciphertext: Some(resource_ciphertext),
-            resource_ciphertext_len,
-            discovery_ciphertext: Some(discovery_ciphertext),
-            discovery_ciphertext_len,
+            encryption_info: Some(encryption_info),
             label_info: Some(label_info),
             auth_sig: None,
             forwarder_info: None,
@@ -897,10 +920,7 @@ impl TransactionBuilder {
             action_root,
             nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
-            resource_ciphertext: None,
-            resource_ciphertext_len: 0,
-            discovery_ciphertext: None,
-            discovery_ciphertext_len: 0,
+            encryption_info: None,
             label_info: Some(label_info),
             auth_sig: None,
             forwarder_info: Some(forwarder_info),
@@ -1143,6 +1163,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
                 let (witness, logic_instance, compliance_public) = TransactionBuilder::build_shielded_output(
+                    &mut api,
                     &mut rng,
                     logic_ref,
                     &payment_addr,
@@ -1156,6 +1177,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
                 let (witness, logic_instance, compliance_public) = TransactionBuilder::build_shielded_output(
+                    &mut api,
                     &mut rng,
                     logic_ref,
                     &payment_addr,

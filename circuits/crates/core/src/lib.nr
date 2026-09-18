@@ -120,7 +120,7 @@ impl Resource {
         keccak256::keccak256(bytes, RCM_BYTES)
     }
     
-    fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
+    pub fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
         // Concatenate all the components of this resource
         let mut bytes = [0; RESOURCE_BYTES];
         let mut offset: u32 = 0;

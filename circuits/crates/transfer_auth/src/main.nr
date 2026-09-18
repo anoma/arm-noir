@@ -1,6 +1,8 @@
 use std::option::Option;
 use std::static_assert;
 use core::{write_bytes, NullifierKey, Resource};
+use std::embedded_curve_ops::{multi_scalar_mul, EmbeddedCurveScalar, EmbeddedCurvePoint};
+use std::aes128::aes128_encrypt;
 
 // Constants for bounding unbounded loops and variable-length arrays
 global MAX_FORWARDER_ADDR_LEN: u32 = 20;
@@ -33,6 +35,9 @@ global PRF_EXPAND_PSI: u8 = 0;
 global PRF_EXPAND_RCM: u8 = 1;
 global BLOB_LEN_BYTES: u32 = 4;
 global PAYLOAD_LEN_BYTES: u32 = 4;
+global ENCRYPTION_NONCE_LEN: u32 = 12;
+global EMBEDDED_CURVE_BASE_FIELD_BYTES: u32 = 32;
+global RESOURCE_WITH_LABEL_BYTES: u32 = RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
 
 /// LabelInfo holds information about label plaintext.
 struct LabelInfo {
@@ -79,15 +84,23 @@ struct TransferAuthWitness {
     /// A consumed persistent resource requires an authorization signature
     auth_sig: Option<[u8; MAX_AUTH_SIG_LEN]>,
     /// See EncryptionInfo struct.
-    resource_ciphertext: Option<[u8; MAX_RESOURCE_CIPHERTEXT_LEN]>,
-    resource_ciphertext_len: u32,
-    /// The discovery ciphertext for the resource
-    discovery_ciphertext: Option<[u8; MAX_DISCOVERY_CIPHERTEXT_LEN]>,
-    discovery_ciphertext_len: u32,
+    encryption_info: Option<EncryptionInfo>,
     /// See LabelInfo struct.
     label_info: Option<LabelInfo>,
     /// See ForwarderInfo struct.
     forwarder_info: Option<ForwarderInfo>,
+}
+
+/// The EncryptionInfo struct holds information about the encryption keys for the
+/// recipient/sender of a resource in a transaction.
+pub struct EncryptionInfo {
+    /// Secret key. randomly generated for persistent resource_ciphertext
+    pub sender_sk: EmbeddedCurveScalar,
+    /// randomly generated for persistent resource_ciphertext(12 bytes)
+    pub encryption_nonce: [u8; ENCRYPTION_NONCE_LEN],
+    /// The discovery ciphertext for the resource
+    discovery_ciphertext: [u8; MAX_DISCOVERY_CIPHERTEXT_LEN],
+    discovery_ciphertext_len: u32,
 }
 
 /// ValueInfo holds information about value plaintext
@@ -95,7 +108,7 @@ pub struct ValueInfo {
     /// The authorization verifying key corresponds to the resource.value.owner
     auth_pk: [u8; MAX_AUTH_PK_LEN],
     /// Public key. Obtain from the receiver for persistent resource_ciphertext
-    encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
+    encryption_pk: EmbeddedCurvePoint,
 }
 
 /// An expirable blob consists of a blob and a deletion criterion.
@@ -105,6 +118,31 @@ struct ExpirableBlob {
     blob_len: u32,
     /// The deletion criterion for the blob.
     deletion_criterion: bool,
+}
+
+/// The struct encoded in the resource payload for persistent created resources.
+pub struct ResourceWithLabel {
+    pub resource: Resource,
+    /// Address of the forwarder contract for this resource.
+    forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
+    /// Address of the wrapped token within this resource (e.g. USDC).
+    erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
+}
+
+impl ResourceWithLabel {
+    fn to_bytes(self) -> [u8; RESOURCE_WITH_LABEL_BYTES] {
+        // Concatenate all the components of this resource
+        let mut bytes = [0; RESOURCE_WITH_LABEL_BYTES];
+        let mut offset: u32 = 0;
+        // Write the resource bytes
+        write_bytes(&mut bytes, &mut offset, self.resource.to_bytes());
+        // Write the forwarder address bytes
+        write_bytes(&mut bytes, &mut offset, self.forwarder_addr);
+        // Write the token address bytes
+        write_bytes(&mut bytes, &mut offset, self.erc20_token_addr);
+        static_assert(offset == RESOURCE_WITH_LABEL_BYTES, "resource with label bytes malformed");
+        bytes
+    }
 }
 
 /// Application data contains four different types of payloads.
@@ -207,13 +245,14 @@ fn calculate_label_ref(
 /// Calculate the value ref based on an authorization key and an encryption key for a given user.
 fn persistent_value_ref(
     auth_pk: [u8; MAX_AUTH_PK_LEN],
-    encryption_pk: [u8; MAX_ENCRYPTION_PK_LEN],
+    encryption_pk: EmbeddedCurvePoint,
 ) -> [u8; 32] {
-    let mut bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
+    let mut bytes = [0; MAX_AUTH_PK_LEN + 2*EMBEDDED_CURVE_BASE_FIELD_BYTES];
     let mut offset = 0;
     write_bytes(&mut bytes, &mut offset, auth_pk);
-    write_bytes(&mut bytes, &mut offset, encryption_pk);
-    static_assert(offset == MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN, "value reference pre-image malformed");
+    write_bytes(&mut bytes, &mut offset, encryption_pk.x.to_le_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+    write_bytes(&mut bytes, &mut offset, encryption_pk.y.to_le_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+    static_assert(offset == MAX_AUTH_PK_LEN + 2*EMBEDDED_CURVE_BASE_FIELD_BYTES, "value reference pre-image malformed");
     keccak256::keccak256(bytes, offset)
 }
 
@@ -414,8 +453,8 @@ impl TransferAuthWitness {
     // check persistent resource creation and return discovery_payload and resource_payload
     fn persistent_create(self) -> AppData {
         let value_info = self.value_info.unwrap();
-        let payload = self.resource_ciphertext.unwrap();
         let label = self.label_info.unwrap();
+        let encryption_info = self.encryption_info.unwrap();
 
         let expected_label_ref = calculate_label_ref(
             label.forwarder_addr,
@@ -429,19 +468,42 @@ impl TransferAuthWitness {
         );
         assert(self.resource.value_ref == expected_value_ref);
 
+        let payload_plaintext = ResourceWithLabel {
+            resource: self.resource,
+            forwarder_addr: label.forwarder_addr,
+            erc20_token_addr: label.erc20_token_addr,
+        }.to_bytes();
+
+        assert(!value_info.encryption_pk.is_infinite());
+        let shared_point = multi_scalar_mul([value_info.encryption_pk], [encryption_info.sender_sk]);
+        let mut concat = [0u8; 4*EMBEDDED_CURVE_BASE_FIELD_BYTES];
+        let mut offset: u32 = 0;
+        write_bytes(&mut concat, &mut offset, value_info.encryption_pk.x.to_le_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+        write_bytes(&mut concat, &mut offset, value_info.encryption_pk.y.to_le_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+        write_bytes(&mut concat, &mut offset, shared_point.x.to_le_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+        write_bytes(&mut concat, &mut offset, shared_point.y.to_le_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+        let hash = keccak256::keccak256(concat, offset);
+        let mut hash_prefix = [0u8; 16];
+        for i in 0..hash_prefix.len() { hash_prefix[i] = hash[i]; }
+        let mut encryption_nonce = [0u8; 16];
+        for i in 0..encryption_info.encryption_nonce.len() { encryption_nonce[i] = encryption_info.encryption_nonce[i]; }
+        let ciphertext = aes128_encrypt(payload_plaintext, encryption_nonce, hash_prefix);
+        let mut ciphertext_padded = [0u8; MAX_RESOURCE_CIPHERTEXT_LEN];
+        for i in 0..ciphertext.len() { ciphertext_padded[i] = ciphertext[i]; }
+
         let mut app_data = AppData::default();
         // Generate resource_payload
         app_data.resource_payload[0] = ExpirableBlob {
-            blob: payload,
-            blob_len: self.resource_ciphertext_len,
+            blob: ciphertext_padded,
+            blob_len: ciphertext.len(),
             deletion_criterion: true,
         };
         app_data.resource_payload_len = 1;
         // Generate discovery_payload
-        let discovery_ciphertext = self.discovery_ciphertext.unwrap();
+        let encryption_info = self.encryption_info.unwrap();
         app_data.discovery_payload[0] = ExpirableBlob {
-            blob: discovery_ciphertext,
-            blob_len: self.discovery_ciphertext_len,
+            blob: encryption_info.discovery_ciphertext,
+            blob_len: encryption_info.discovery_ciphertext_len,
             deletion_criterion: true,
         };
         app_data.discovery_payload_len = 1;
@@ -483,7 +545,7 @@ fn test_persistent_consume() {
                 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08,
                 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8
             ],
-            encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
+            encryption_pk: EmbeddedCurvePoint::generator(),
         }),
         auth_sig: Option::some([
             0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
@@ -491,10 +553,7 @@ fn test_persistent_consume() {
             0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
             0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98
         ]),
-        resource_ciphertext: Option::some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: Option::none(),
-        discovery_ciphertext_len: 0,
+        encryption_info: Option::none(),
         label_info: Option::none(),
         forwarder_info: Option::none(),
     };
@@ -534,13 +593,15 @@ fn test_persistent_create() {
         nullifier_key: Option::none(), // Not required for resource creation
         value_info: Option::some(ValueInfo {
             auth_pk: [0; MAX_AUTH_PK_LEN],
-            encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
+            encryption_pk: EmbeddedCurvePoint::generator(),
         }),
         auth_sig: Option::none(), // Not required for resource creation
-        resource_ciphertext: Option::some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: Option::some([0; MAX_DISCOVERY_CIPHERTEXT_LEN]),
-        discovery_ciphertext_len: 0,
+        encryption_info: Option::some(EncryptionInfo {
+            sender_sk: EmbeddedCurveScalar::new(0, 0),
+            encryption_nonce: [0; ENCRYPTION_NONCE_LEN],
+            discovery_ciphertext: [0; MAX_DISCOVERY_CIPHERTEXT_LEN],
+            discovery_ciphertext_len: 0,
+        }),
         label_info: Option::some(LabelInfo {
             forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
             erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
@@ -582,10 +643,7 @@ fn test_ephemeral_wrap() {
         nullifier_key: Option::some(NullifierKey { bytes: [0; 32] }),
         value_info: Option::none(),
         auth_sig: Option::none(),
-        resource_ciphertext: Option::none(),
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: Option::none(),
-        discovery_ciphertext_len: 0,
+        encryption_info: Option::none(),
         label_info: Option::some(LabelInfo {
             forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
             erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
@@ -636,10 +694,7 @@ fn test_ephemeral_unwrap() {
         nullifier_key: Option::none(), // Not required for resource creation/unwrapping
         value_info: Option::none(),
         auth_sig: Option::none(),
-        resource_ciphertext: Option::none(),
-        resource_ciphertext_len: 0,
-        discovery_ciphertext: Option::none(),
-        discovery_ciphertext_len: 0,
+        encryption_info: Option::none(),
         label_info: Option::some(LabelInfo {
             forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
             erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
