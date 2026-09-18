@@ -602,7 +602,7 @@ impl TransactionBuilder {
         let payment_addr = spending_key.to_viewing_key().to_payment_address();
         let value_info = ValueInfo {
             auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
-            encryption_pk: payment_addr.public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            encryption_pk: payment_addr.encryption_public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
         };
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
@@ -777,7 +777,7 @@ impl TransactionBuilder {
         // The value info
         let value_info = ValueInfo {
             auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
-            encryption_pk: payment_addr.public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            encryption_pk: payment_addr.encryption_public_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
         };
         // Calculate persistent value reference
         let mut value_ref_bytes = [0; MAX_AUTH_PK_LEN + MAX_ENCRYPTION_PK_LEN];
