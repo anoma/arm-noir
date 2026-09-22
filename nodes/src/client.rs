@@ -22,6 +22,8 @@ use k256::AffinePoint;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use nodes::read_bytes;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
+use std::io::Write;
+use std::io::Read;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -626,7 +628,7 @@ impl From<ConsumedResourceWitness> for InputValue {
 }
 
 /// Public information of consumed resources.
-#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct ConsumedResourcePublic {
     /// The nullifier of the consumed [Resource].
     pub resource_nullifier: [u8; DIGEST_BYTES],
@@ -648,7 +650,7 @@ impl From<ConsumedResourcePublic> for InputValue {
 }
 
 /// Public information of created resources.
-#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct CreatedResourcePublic {
     /// The commitment to the created [Resource].
     pub resource_commitment: [u8; DIGEST_BYTES],
@@ -702,11 +704,23 @@ impl EmbeddedCurvePoint {
         combined_bytes
     }
 
-    pub fn from_bytes(bigint: &[u8]) -> Self {
+    pub fn from_bytes(bigint: &[u8; 64]) -> Self {
         Self {
             x: FieldElement::from_le_bytes_reduce(&bigint[..32]),
             y: FieldElement::from_le_bytes_reduce(&bigint[32..]),
         }
+    }
+}
+
+impl BorshSerialize for EmbeddedCurvePoint {
+    fn serialize<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(&self.to_bytes())
+    }
+}
+
+impl BorshDeserialize for EmbeddedCurvePoint {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        Ok(Self::from_bytes(&<[u8; _]>::deserialize_reader(reader)?))
     }
 }
 
@@ -759,7 +773,7 @@ impl Mul<EmbeddedCurveScalar> for EmbeddedCurvePoint {
 }
 
 /// The compliance instance contains all public inputs to the compliance proof.
-#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
+#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ComplianceInstance {
     /// Public information of consumed resources
     pub consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
@@ -914,7 +928,7 @@ impl From<ComplianceWitness> for InputValue {
 }
 
 /// An expirable blob consists of a blob and a deletion criterion.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct ExpirableBlob {
     /// The blob data as a vector of u32 words.
     pub blob: [u8; MAX_BLOB_LEN],
@@ -924,7 +938,7 @@ pub struct ExpirableBlob {
 }
 
 /// Application data contains four different types of payloads.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct AppData {
     /// The resource payload blobs.
     pub resource_payload: [ExpirableBlob; MAX_BLOBS_PER_PAYLOAD],
@@ -962,7 +976,7 @@ impl Default for AppData {
 }
 
 /// Represents a logic instance with its associated data.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, BorshSerialize, BorshDeserialize)]
 pub struct ResourceLogicInstance {
     /// The logic instance's tag (either commitment or nullifier)
     pub tag: [u8; DIGEST_BYTES],

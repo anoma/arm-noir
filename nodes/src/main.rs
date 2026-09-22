@@ -85,6 +85,8 @@ use k256::ecdh::diffie_hellman;
 use client::DISCOVERY_PK_LEN;
 use client::DISCOVERY_SHARED_POINT_LEN;
 use client::Ciphertext;
+use barretenberg_rs::generated_types::CircuitProveResponse;
+use barretenberg_rs::BarretenbergError;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -383,13 +385,62 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum ShieldedPoolError {
+    BarretenbergError(BarretenbergError),
+    LogicProofError,
+    ComplianceProofError,
+}
+
 // State of the shielded pool
 #[derive(Default, BorshSerialize, BorshDeserialize, Clone)]
-struct PoolState {
-    // Nodes not yet in the tree
+struct ShieldedPool {
+    // Nodes in the pool
     note_queue: Vec<Resource>,
-    // Nullifiers not yet processed
-    nullifier_queue: Vec<Nullifier>,
+    // Nullifiers in the pool
+    nullifiers: Vec<Nullifier>,
+    // Transactions in the pool
+    transactions: Vec<Transaction>,
+}
+
+impl ShieldedPool {
+    fn submit<B: Backend>(
+        &mut self,
+        api: &mut BarretenbergApi<B>,
+        logic_circuit: &mut BarretenbergCircuit,
+        compliance_circuit: &mut BarretenbergCircuit,
+        tx: Transaction,
+    ) -> Result<(), ShieldedPoolError> {
+        // Check all the logic proofs
+        for (logic_instance, proof) in tx.logic_instances {
+            let prove_response = CircuitProveResponse {
+                proof,
+                public_inputs: vec![logic_instance.digest().to_be_bytes()],
+                vk: logic_circuit.compute_vk_response.clone(),
+            };
+            let verify_response = logic_circuit
+                .circuit_verify(api, prove_response.clone())
+                .map_err(ShieldedPoolError::BarretenbergError)?;
+            println!("Logic proof verification response: {:?}", verify_response);
+            if !verify_response.verified {
+                return Err(ShieldedPoolError::LogicProofError);
+            }
+        }
+        // Check the compliance proof
+        let compliance_prove_response = CircuitProveResponse {
+            proof: tx.compliance_proof,
+            public_inputs: vec![tx.compliance_instance.digest().to_be_bytes()],
+            vk: compliance_circuit.compute_vk_response.clone(),
+        };
+        let compliance_verify_response = compliance_circuit
+            .circuit_verify(api, compliance_prove_response.clone())
+            .map_err(ShieldedPoolError::BarretenbergError)?;
+        println!("Compliance proof verification response: {:?}", compliance_verify_response);
+        if !compliance_verify_response.verified {
+                return Err(ShieldedPoolError::ComplianceProofError);
+            }
+        Ok(())
+    }
 }
 
 // The client's view of the shielded pool
@@ -408,7 +459,7 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn synchronize(pool: PoolState, fvks: &[ExtendedFullViewingKey]) -> Self {
+    fn synchronize(pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
         let mut state = Self::default();
         // Scan the notes in the queue
         for resource in pool.note_queue {
@@ -425,7 +476,7 @@ impl ClientState {
             state.current_pos += 1;
         }
         // Scan the nullifier in the queue
-        for nullifier in pool.nullifier_queue {
+        for nullifier in pool.nullifiers {
             if let Some(pos) = state.nf_map.get(&nullifier) {
                 state.spent_notes.insert(*pos);
             }
@@ -531,13 +582,18 @@ impl<T: Default + Eq + Ord> PartialOrd for SignMagnitude<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+// A resource machine transaction
 struct Transaction {
+    // Logic instances and their corresponding proofs
     logic_instances: Vec<(ResourceLogicInstance, Vec<Vec<u8>>)>,
+    // The compliance instance
     compliance_instance: ComplianceInstance,
+    // The compliance proof
     compliance_proof: Vec<Vec<u8>>,
 }
 
+// Data structure to facilitate building Transactions
 struct TransactionBuilder {
     // The consumed nullifiers
     consumed_nullifiers: [[u8; DIGEST_BYTES]; MAX_CONSUMED],
@@ -1011,9 +1067,7 @@ impl TransactionBuilder {
         input_map.insert("witness".to_string(), logic_witness.into());
         // Compute the proof from the witness bytes
         let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
-        let verify_response = self.logic_circuit.circuit_verify(api, prove_response.clone()).unwrap();
         self.consumed_logic_proofs[usize::from(self.consumed_count)] = prove_response.proof;
-        println!("Input verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
         // Accumulate delta
         *self.delta_map.entry(compliance_witness.resource.kind(api)).or_default() += SignMagnitude::from(compliance_witness.resource.quantity);
@@ -1037,9 +1091,7 @@ impl TransactionBuilder {
         input_map.insert("witness".to_string(), witness.into());
         // Compute the proof from the witness bytes
         let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
-        let verify_response = self.logic_circuit.circuit_verify(api, prove_response.clone()).unwrap();
         self.created_logic_proofs[usize::from(self.created_count)] = prove_response.proof;
-        println!("Change proof verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
         self.created_count += 1;
     }
@@ -1084,7 +1136,7 @@ impl TransactionBuilder {
     }
 
     fn build<B: Backend>(
-        mut self,
+        &mut self,
         api: &mut BarretenbergApi<B>,
         compliance_witness: ComplianceWitness,
         compliance_instance: ComplianceInstance,
@@ -1093,8 +1145,6 @@ impl TransactionBuilder {
         input_map.insert("witness".to_string(), compliance_witness.into());
         // Compute the proof from the witness bytes
         let prove_response = self.compliance_circuit.circuit_prove(api, input_map).unwrap();
-        let verify_response = self.compliance_circuit.circuit_verify(api, prove_response.clone()).unwrap();
-        println!("Compliance verification response: {:?}", verify_response);
         assert_eq!(prove_response.public_inputs[0].clone(), compliance_instance.digest().to_be_bytes());
         let mut logic_instances = vec![];
         for idx in 0..usize::from(self.consumed_count) {
@@ -1117,9 +1167,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let pool_state_path = Path::new("pool_state.bin");
     // The state of the shielded pool
     let mut pool_state = if let Ok(state_bytes) = std::fs::read(pool_state_path) {
-        PoolState::try_from_slice(&state_bytes)?
+        ShieldedPool::try_from_slice(&state_bytes)?
     } else {
-        PoolState::default()
+        ShieldedPool::default()
     };
     // Attempt to load the wallet, or default to empty if it doesn't exist
     let store = Store::load(wallet_path).unwrap_or_default();
@@ -1241,13 +1291,16 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let (compliance_witness, compliance_instance) = builder.build_compliance_artifacts(&mut rng);
             // Finally update the state of the pool
             for i in 0..builder.consumed_count {
-                pool_state.nullifier_queue.push(builder.consumed_nullifiers[usize::from(i)]);
+                pool_state.nullifiers.push(builder.consumed_nullifiers[usize::from(i)]);
             }
             for i in 0..builder.created_count {
                 pool_state.note_queue.push(builder.created_resources[usize::from(i)]);
             }
             // Finally build the transaction
             let transaction = builder.build(&mut api, compliance_witness, compliance_instance);
+            pool_state
+                .submit(&mut api, &mut builder.logic_circuit, &mut builder.compliance_circuit, transaction)
+                .expect("Transaction validation failed");
             // Save the updated state
             let state_bytes = borsh::to_vec(&pool_state)?;
             std::fs::write(pool_state_path, state_bytes)?;
