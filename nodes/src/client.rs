@@ -112,6 +112,7 @@ impl<const N: usize> Default for Array<N> {
 }
 
 pub type Nullifier = [u8; DIGEST_BYTES];
+pub type Commitment = [u8; DIGEST_BYTES];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ciphertext {

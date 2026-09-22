@@ -87,6 +87,7 @@ use client::DISCOVERY_SHARED_POINT_LEN;
 use client::Ciphertext;
 use barretenberg_rs::generated_types::CircuitProveResponse;
 use barretenberg_rs::BarretenbergError;
+use client::Commitment;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -392,8 +393,8 @@ enum ShieldedPoolError {
     ComplianceProof,
     DuplicateNullifier,
     DuplicateCommitment,
-    NullifierNotFound,
-    CommitmentNotFound,
+    UnpairedNullifier,
+    UnpairedCommitment,
     CircuitNotRegistered,
 }
 
@@ -403,7 +404,9 @@ struct ShieldedPool {
     // Nodes in the pool
     note_queue: Vec<Resource>,
     // Nullifiers in the pool
-    nullifiers: Vec<Nullifier>,
+    nullifiers: BTreeSet<Nullifier>,
+    // Resource commitments in the pool
+    commitments: Vec<Commitment>,
     // Transactions in the pool
     transactions: Vec<Transaction>,
     // Registered logic circuits
@@ -412,8 +415,12 @@ struct ShieldedPool {
 }
 
 impl ShieldedPool {
-    fn register_logic_circuit(&mut self, logic_circuit: BarretenbergCircuit) {
+    fn register_logic(&mut self, logic_circuit: BarretenbergCircuit) {
         self.logic_circuits.insert(logic_circuit.compute_vk_response.hash.clone(), logic_circuit);
+    }
+
+    fn deregister_logic(&mut self, logic_hash: Vec<u8>) -> Option<BarretenbergCircuit> {
+        self.logic_circuits.remove(&logic_hash)
     }
     
     fn submit<B: Backend>(
@@ -456,26 +463,26 @@ impl ShieldedPool {
             }
         }
         // Check all the logic proofs
-        for (logic_instance, proof) in tx.logic_instances {
+        for (logic_instance, proof) in &tx.logic_instances {
             // Cross-check the tags and grab the relevant circuit
             let logic_circuit = if logic_instance.is_consumed {
                 // Cross-check the nullifiers
                 if let Some(hash) = nullifiers.remove(&logic_instance.tag) {
                     self.logic_circuits.get_mut(&hash.to_vec()).ok_or(ShieldedPoolError::CircuitNotRegistered)?
                 } else {
-                    return Err(ShieldedPoolError::NullifierNotFound);
+                    return Err(ShieldedPoolError::UnpairedNullifier);
                 }
             } else {
                 // Cross-check the commitments
                 if let Some(hash) = commitments.remove(&logic_instance.tag) {
                     self.logic_circuits.get_mut(&hash.to_vec()).ok_or(ShieldedPoolError::CircuitNotRegistered)?
                 } else {
-                    return Err(ShieldedPoolError::CommitmentNotFound);
+                    return Err(ShieldedPoolError::UnpairedCommitment);
                 }
             };
             // Verify the proofs
             let prove_response = CircuitProveResponse {
-                proof,
+                proof: proof.clone(),
                 public_inputs: vec![logic_instance.digest().to_be_bytes()],
                 vk: logic_circuit.compute_vk_response.clone(),
             };
@@ -485,6 +492,26 @@ impl ShieldedPool {
             println!("Logic proof verification response: {:?}", verify_response);
             if !verify_response.verified {
                 return Err(ShieldedPoolError::LogicProof);
+            }
+        }
+        // Ensure that there's a logic instance for each tag in the compliance instance
+        if !nullifiers.is_empty() {
+            return Err(ShieldedPoolError::UnpairedNullifier);
+        } else if !commitments.is_empty() {
+            return Err(ShieldedPoolError::UnpairedCommitment);
+        }
+        // Update the nullifier set
+        for (logic_instance, _proof) in tx.logic_instances {
+            if logic_instance.is_consumed {
+                // Handle nullification
+                if self.nullifiers.contains(&logic_instance.tag) {
+                    return Err(ShieldedPoolError::DuplicateNullifier);
+                } else {
+                    self.nullifiers.insert(logic_instance.tag);
+                }
+            } else {
+                // Update the Merkle tree
+                self.commitments.push(logic_instance.tag);
             }
         }
         Ok(())
@@ -1227,7 +1254,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
     let logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
     // Register the transfer authorization circuit with the shielded pool
-    shielded_pool.register_logic_circuit(logic_circuit);
+    shielded_pool.register_logic(logic_circuit);
     // Attempt to load the wallet, or default to empty if it doesn't exist
     let store = Store::load(wallet_path).unwrap_or_default();
     let mut rng = rand::thread_rng();
@@ -1343,9 +1370,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             let (compliance_witness, compliance_instance) = builder.build_compliance_artifacts(&mut rng);
             // Finally update the state of the pool
-            for i in 0..builder.consumed_count {
-                shielded_pool.nullifiers.push(builder.consumed_nullifiers[usize::from(i)]);
-            }
             for i in 0..builder.created_count {
                 shielded_pool.note_queue.push(builder.created_resources[usize::from(i)]);
             }
