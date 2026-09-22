@@ -764,6 +764,40 @@ impl TransactionBuilder {
         (logic_witness, compliance_witness, logic_instance, compliance_public)
     }
 
+    // Encrypt the given plaintext with the given key preimage and
+    // return the ciphertext and random nonce used
+    fn encrypt<B: Backend>(
+        api: &mut BarretenbergApi<B>,
+        rng: &mut (impl Rng + rand::CryptoRng),
+        mut plaintext: Vec<u8>,
+        key_preimage: &[u8],
+    ) -> (Vec<u8>, [u8; DISCOVERY_NONCE_LEN]) {
+        // Generate a nonce
+        let mut nonce = [0u8; DISCOVERY_NONCE_LEN];
+        rng.try_fill_bytes(&mut nonce)
+            .expect("Failed to fill discovery nonce");
+        // Pad the nonce
+        let mut nonce_padded = [0u8; 16];
+        nonce_padded[..DISCOVERY_NONCE_LEN].copy_from_slice(&nonce);
+        // Derive the encryption key
+        let hash = keccak256(key_preimage);
+        // Pad the plaintext
+        let remainder = 16 - (plaintext.len() % 16);
+        plaintext.resize(plaintext.len() + remainder, remainder as u8);
+        // Finally do the encryptiion
+        let ciphertext = api.aes_encrypt(&plaintext, &nonce_padded, &hash[..16], plaintext.len() as u32)
+            .expect("unable to perform AES encryption")
+            .ciphertext;
+        (ciphertext, nonce)
+    }
+
+    // Pad the given slice to the given array length
+    fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
+        let mut dest = [0u8; M];
+        dest[..src.len()].copy_from_slice(src);
+        dest
+    }
+
     fn build_shielded_output<B: Backend>(
         api: &mut BarretenbergApi<B>,
         rng: &mut (impl Rng + rand::CryptoRng),
@@ -802,62 +836,38 @@ impl TransactionBuilder {
             label_ref,
             nk_commitment: payment_addr.nullifier_key_commitment.0,
         };
-        let mut payload_plaintext = ResourceWithLabel {
+        let payload_plaintext = ResourceWithLabel {
             resource: resource,
             forwarder_addr: label_info.forwarder_addr,
             erc20_token_addr: label_info.erc20_token_addr,
         }.to_bytes().to_vec();
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
-        let mut discovery_nonce = [0u8; DISCOVERY_NONCE_LEN];
-        rng.try_fill_bytes(&mut discovery_nonce)
-            .expect("Failed to fill discovery nonce");
-        let mut discovery_nonce_padded = [0u8; 16];
-        discovery_nonce_padded[..DISCOVERY_NONCE_LEN].copy_from_slice(&discovery_nonce);
+        // Generate discovery ciphertext
         let discovery_sk = SecretKey::random(rng);
         let discovery_shared_point = diffie_hellman(discovery_sk.to_nonzero_scalar(), payment_addr.discovery_public_key.as_affine());
         let mut discovery_concat = [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
         discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(&payment_addr.discovery_public_key.to_encoded_point(false).as_bytes());
         discovery_concat[DISCOVERY_PK_LEN..].copy_from_slice(&discovery_shared_point.raw_secret_bytes());
-        let discovery_hash = keccak256(discovery_concat);
-        let mut discovery_plaintext = vec![0u8];
-        let remainder = 16 - (discovery_plaintext.len() % 16);
-        discovery_plaintext.resize(discovery_plaintext.len() + remainder, remainder as u8);
-        let discovery_ciphertext = api.aes_encrypt(&discovery_plaintext, &discovery_nonce_padded, &discovery_hash[..16], discovery_plaintext.len() as u32)
-            .expect("unable to perform AES encryption")
-            .ciphertext;
+        let (discovery_ciphertext, discovery_nonce) = Self::encrypt(api, rng, vec![0u8], &discovery_concat);
         let discovery_ciphertext = Ciphertext {
             cipher: discovery_ciphertext.try_into().unwrap(),
             nonce: discovery_nonce,
             pk: discovery_sk.public_key().into(),
         }.to_bytes();
-        let discovery_ciphertext_len = discovery_ciphertext.len() as u32;
-        let mut encryption_nonce = [0u8; ENCRYPTION_NONCE_LEN];
-        rng.try_fill_bytes(&mut encryption_nonce)
-            .expect("Failed to fill encryption nonce");
-        let mut encryption_info = EncryptionInfo {
-            discovery_ciphertext: [0u8; _],
-            discovery_ciphertext_len,
+        // Generate encryption ciphertext
+        let sender_sk = EmbeddedCurveScalar::random(rng);
+        let shared_point = value_info.encryption_pk * sender_sk;
+        let mut encryption_concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
+        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&value_info.encryption_pk.to_bytes());
+        encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&shared_point.to_bytes());
+        let (resource_ciphertext, encryption_nonce) = Self::encrypt(api, rng, payload_plaintext, &encryption_concat);
+        let encryption_info = EncryptionInfo {
+            discovery_ciphertext: Self::pad_slice(&discovery_ciphertext),
+            discovery_ciphertext_len: discovery_ciphertext.len() as u32,
             encryption_nonce,
-            sender_sk: EmbeddedCurveScalar::random(rng),
+            sender_sk,
         };
-        encryption_info.discovery_ciphertext[0..discovery_ciphertext.len()].copy_from_slice(&discovery_ciphertext);
-        //
-        let shared_point = value_info.encryption_pk * encryption_info.sender_sk;
-        let mut concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
-        concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&value_info.encryption_pk.to_bytes());
-        concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&shared_point.to_bytes());
-        let hash = keccak256(concat);
-        let mut encryption_nonce_padded = [0u8; 16];
-        encryption_nonce_padded[..ENCRYPTION_NONCE_LEN].copy_from_slice(&encryption_nonce);
-        let remainder = 16 - (payload_plaintext.len() % 16);
-        payload_plaintext.resize(payload_plaintext.len() + remainder, remainder as u8);
-        let ciphertext = api.aes_encrypt(&payload_plaintext, &encryption_nonce_padded, &hash[..16], payload_plaintext.len() as u32)
-            .expect("unable to perform AES encryption")
-            .ciphertext;
-        let mut resource_ciphertext = [0u8; _];
-        resource_ciphertext[..ciphertext.len()].copy_from_slice(&ciphertext);
-        let resource_ciphertext_len = ciphertext.len() as u32;
         // The transfer authorization witness
         let witness = TransferAuthWitness {
             resource,
@@ -874,18 +884,17 @@ impl TransactionBuilder {
         let mut app_data = AppData::default();
         // Generate resource_payload
         app_data.resource_payload[0] = ExpirableBlob {
-            blob: resource_ciphertext,
-            blob_len: resource_ciphertext_len,
+            blob: Self::pad_slice(&resource_ciphertext),
+            blob_len: resource_ciphertext.len() as u32,
             deletion_criterion: true,
         };
         app_data.resource_payload_len = 1;
         // Generate discovery_payload
         app_data.discovery_payload[0] = ExpirableBlob {
-            blob: [0u8; _],
-            blob_len: discovery_ciphertext_len,
+            blob: Self::pad_slice(&discovery_ciphertext),
+            blob_len: discovery_ciphertext.len() as u32,
             deletion_criterion: true,
         };
-        app_data.discovery_payload[0].blob[..discovery_ciphertext.len()].copy_from_slice(&discovery_ciphertext);
         app_data.discovery_payload_len = 1;
         let resource_commitment = witness.resource.commitment();
         // Finally construct the resource logic instance
