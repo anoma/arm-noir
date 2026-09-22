@@ -79,6 +79,12 @@ use client::EncryptionInfo;
 use wallet::GRUMPKIN_PUBLIC_KEY_LEN;
 use client::ENCRYPTION_NONCE_LEN;
 use client::ResourceWithLabel;
+use client::DISCOVERY_NONCE_LEN;
+use k256::SecretKey;
+use k256::ecdh::diffie_hellman;
+use client::DISCOVERY_PK_LEN;
+use client::DISCOVERY_SHARED_POINT_LEN;
+use client::Ciphertext;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -760,7 +766,7 @@ impl TransactionBuilder {
 
     fn build_shielded_output<B: Backend>(
         api: &mut BarretenbergApi<B>,
-        rng: &mut impl Rng,
+        rng: &mut (impl Rng + rand::CryptoRng),
         logic_ref: [u8; DIGEST_BYTES],
         payment_addr: &PaymentAddress,
         erc20_token_addr: Address,
@@ -803,17 +809,39 @@ impl TransactionBuilder {
         }.to_bytes().to_vec();
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
-        let discovery_ciphertext = [0u8; _];
-        let discovery_ciphertext_len = 0;
+        let mut discovery_nonce = [0u8; DISCOVERY_NONCE_LEN];
+        rng.try_fill_bytes(&mut discovery_nonce)
+            .expect("Failed to fill discovery nonce");
+        let mut discovery_nonce_padded = [0u8; 16];
+        discovery_nonce_padded[..DISCOVERY_NONCE_LEN].copy_from_slice(&discovery_nonce);
+        let discovery_sk = SecretKey::random(rng);
+        let discovery_shared_point = diffie_hellman(discovery_sk.to_nonzero_scalar(), payment_addr.discovery_public_key.as_affine());
+        let mut discovery_concat = [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
+        discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(&payment_addr.discovery_public_key.to_encoded_point(false).as_bytes());
+        discovery_concat[DISCOVERY_PK_LEN..].copy_from_slice(&discovery_shared_point.raw_secret_bytes());
+        let discovery_hash = keccak256(discovery_concat);
+        let mut discovery_plaintext = vec![0u8];
+        let remainder = 16 - (discovery_plaintext.len() % 16);
+        discovery_plaintext.resize(discovery_plaintext.len() + remainder, remainder as u8);
+        let discovery_ciphertext = api.aes_encrypt(&discovery_plaintext, &discovery_nonce_padded, &discovery_hash[..16], discovery_plaintext.len() as u32)
+            .expect("unable to perform AES encryption")
+            .ciphertext;
+        let discovery_ciphertext = Ciphertext {
+            cipher: discovery_ciphertext.try_into().unwrap(),
+            nonce: discovery_nonce,
+            pk: discovery_sk.public_key().into(),
+        }.to_bytes();
+        let discovery_ciphertext_len = discovery_ciphertext.len() as u32;
         let mut encryption_nonce = [0u8; ENCRYPTION_NONCE_LEN];
         rng.try_fill_bytes(&mut encryption_nonce)
             .expect("Failed to fill encryption nonce");
-        let encryption_info = EncryptionInfo {
-            discovery_ciphertext: discovery_ciphertext,
+        let mut encryption_info = EncryptionInfo {
+            discovery_ciphertext: [0u8; _],
             discovery_ciphertext_len,
             encryption_nonce,
             sender_sk: EmbeddedCurveScalar::random(rng),
         };
+        encryption_info.discovery_ciphertext[0..discovery_ciphertext.len()].copy_from_slice(&discovery_ciphertext);
         //
         let shared_point = value_info.encryption_pk * encryption_info.sender_sk;
         let mut concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
@@ -853,10 +881,11 @@ impl TransactionBuilder {
         app_data.resource_payload_len = 1;
         // Generate discovery_payload
         app_data.discovery_payload[0] = ExpirableBlob {
-            blob: discovery_ciphertext,
+            blob: [0u8; _],
             blob_len: discovery_ciphertext_len,
             deletion_criterion: true,
         };
+        app_data.discovery_payload[0].blob[..discovery_ciphertext.len()].copy_from_slice(&discovery_ciphertext);
         app_data.discovery_payload_len = 1;
         let resource_commitment = witness.resource.commitment();
         // Finally construct the resource logic instance

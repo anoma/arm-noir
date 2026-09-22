@@ -18,6 +18,10 @@ use std::ops::Neg;
 use ark_ff::BigInteger;
 use std::ops::Mul;
 use ark_ec::CurveGroup;
+use k256::AffinePoint;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use nodes::read_bytes;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -32,6 +36,9 @@ const MAX_FORWARDER_ADDR_LEN: usize = 20;
 const MAX_ERC20_TOKEN_ADDR_LEN: usize = 20;
 pub const MAX_ETH_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
+pub const DISCOVERY_PK_LEN: usize = 65;
+pub const DISCOVERY_SHARED_POINT_LEN: usize = 32;
+const DISCOVERY_CIPHERTEXT_LEN: usize = 16;
 const MAX_ENCRYPTION_PK_LEN: usize = 65;
 const MAX_AUTH_SIG_LEN: usize = 64;
 const MAX_RESOURCE_CIPHERTEXT_LEN: usize = 340;
@@ -70,6 +77,7 @@ const PAYLOAD_LEN_BYTES: usize = 4;
 const BLOB_LEN_BYTES: u32 = 4;
 const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
 pub const ENCRYPTION_NONCE_LEN: usize = 12;
+pub const DISCOVERY_NONCE_LEN: usize = 12;
 const RESOURCE_WITH_LABEL_BYTES: usize = RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
 
 /// Construct input value from Option type
@@ -102,6 +110,47 @@ impl<const N: usize> Default for Array<N> {
 }
 
 pub type Nullifier = [u8; DIGEST_BYTES];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ciphertext {
+    // AES GCM encrypted message
+    pub cipher: [u8; DISCOVERY_CIPHERTEXT_LEN],
+    // 96-bits; unique per message
+    pub nonce: [u8; DISCOVERY_NONCE_LEN],
+    // Sender's public key
+    pub pk: AffinePoint,
+}
+
+impl Ciphertext {
+    /// Serializes the Ciphertext into a fixed-length byte array of size `N`.
+    /// The layout is: Nonce (12 bytes) | PK (65 bytes) | Cipher Data | Zero Padding
+    pub fn to_bytes(&self) -> [u8; DISCOVERY_CIPHERTEXT_LEN + DISCOVERY_NONCE_LEN + DISCOVERY_PK_LEN] {
+        let mut bytes = [0u8; _];
+        let mut offset: usize = 0;
+        // 1. Write nonce (12 bytes)
+        write_bytes(&mut bytes, &mut offset, &self.nonce);
+        // 2. Write public key (65 bytes, uncompressed SEC1)
+        let pk_bytes = self.pk.to_encoded_point(false);
+        write_bytes(&mut bytes, &mut offset, pk_bytes.as_bytes());
+        // 3. Write cipher data (remaining bytes are implicitly zero-padded)
+        write_bytes(&mut bytes, &mut offset, &self.cipher);
+        bytes
+    }
+
+    /// Deserializes a Ciphertext from a fixed-length byte array of size `N`.
+    pub fn from_bytes(bytes: &[u8; DISCOVERY_CIPHERTEXT_LEN + DISCOVERY_NONCE_LEN + DISCOVERY_PK_LEN]) -> Option<Self> {
+        let mut offset: usize = 0;
+        // 1. Read nonce
+        let nonce = read_bytes(bytes, &mut offset);
+        // 2. Read public key
+        let pk_slice: [u8; DISCOVERY_PK_LEN] = read_bytes(bytes, &mut offset);
+        let encoded_point = k256::EncodedPoint::from_bytes(&pk_slice).ok()?;
+        let pk = Option::from(k256::AffinePoint::from_encoded_point(&encoded_point))?;
+        // 3. Read cipher data
+        let cipher = read_bytes(bytes, &mut offset);
+        Some(Self {cipher, nonce, pk, })
+    }
+}
 
 /// ARM Resource
 #[derive(Deserialize, Serialize, Clone, Copy, Default, BorshSerialize, BorshDeserialize, Debug)]
