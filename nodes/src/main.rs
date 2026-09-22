@@ -388,8 +388,13 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
 #[derive(Debug)]
 enum ShieldedPoolError {
     BarretenbergError(BarretenbergError),
-    LogicProofError,
-    ComplianceProofError,
+    LogicProof,
+    ComplianceProof,
+    DuplicateNullifier,
+    DuplicateCommitment,
+    NullifierNotFound,
+    CommitmentNotFound,
+    CircuitNotRegistered,
 }
 
 // State of the shielded pool
@@ -401,31 +406,22 @@ struct ShieldedPool {
     nullifiers: Vec<Nullifier>,
     // Transactions in the pool
     transactions: Vec<Transaction>,
+    // Registered logic circuits
+    #[borsh(skip)]
+    logic_circuits: BTreeMap<Vec<u8>, BarretenbergCircuit>,
 }
 
 impl ShieldedPool {
+    fn register_logic_circuit(&mut self, logic_circuit: BarretenbergCircuit) {
+        self.logic_circuits.insert(logic_circuit.compute_vk_response.hash.clone(), logic_circuit);
+    }
+    
     fn submit<B: Backend>(
         &mut self,
         api: &mut BarretenbergApi<B>,
-        logic_circuit: &mut BarretenbergCircuit,
         compliance_circuit: &mut BarretenbergCircuit,
         tx: Transaction,
     ) -> Result<(), ShieldedPoolError> {
-        // Check all the logic proofs
-        for (logic_instance, proof) in tx.logic_instances {
-            let prove_response = CircuitProveResponse {
-                proof,
-                public_inputs: vec![logic_instance.digest().to_be_bytes()],
-                vk: logic_circuit.compute_vk_response.clone(),
-            };
-            let verify_response = logic_circuit
-                .circuit_verify(api, prove_response.clone())
-                .map_err(ShieldedPoolError::BarretenbergError)?;
-            println!("Logic proof verification response: {:?}", verify_response);
-            if !verify_response.verified {
-                return Err(ShieldedPoolError::LogicProofError);
-            }
-        }
         // Check the compliance proof
         let compliance_prove_response = CircuitProveResponse {
             proof: tx.compliance_proof,
@@ -437,8 +433,60 @@ impl ShieldedPool {
             .map_err(ShieldedPoolError::BarretenbergError)?;
         println!("Compliance proof verification response: {:?}", compliance_verify_response);
         if !compliance_verify_response.verified {
-                return Err(ShieldedPoolError::ComplianceProofError);
+            return Err(ShieldedPoolError::ComplianceProof);
+        }
+        let mut nullifiers = BTreeMap::new();
+        let mut commitments = BTreeMap::new();
+        // Track the nullifiers encountered
+        for i in 0..tx.compliance_instance.consumed_count {
+            let consumed_public = tx.compliance_instance.consumed_publics[i as usize];
+            if nullifiers.contains_key(&consumed_public.resource_nullifier) {
+                return Err(ShieldedPoolError::DuplicateNullifier);
+            } else {
+                nullifiers.insert(consumed_public.resource_nullifier, consumed_public.resource_logic_ref);
             }
+        }
+        // Track the commitments encountered
+        for i in 0..tx.compliance_instance.created_count {
+            let created_public = tx.compliance_instance.created_publics[i as usize];
+            if commitments.contains_key(&created_public.resource_commitment) {
+                return Err(ShieldedPoolError::DuplicateCommitment);
+            } else {
+                commitments.insert(created_public.resource_commitment, created_public.resource_logic_ref);
+            }
+        }
+        // Check all the logic proofs
+        for (logic_instance, proof) in tx.logic_instances {
+            // Cross-check the tags and grab the relevant circuit
+            let logic_circuit = if logic_instance.is_consumed {
+                // Cross-check the nullifiers
+                if let Some(hash) = nullifiers.remove(&logic_instance.tag) {
+                    self.logic_circuits.get_mut(&hash.to_vec()).ok_or(ShieldedPoolError::CircuitNotRegistered)?
+                } else {
+                    return Err(ShieldedPoolError::NullifierNotFound);
+                }
+            } else {
+                // Cross-check the commitments
+                if let Some(hash) = commitments.remove(&logic_instance.tag) {
+                    self.logic_circuits.get_mut(&hash.to_vec()).ok_or(ShieldedPoolError::CircuitNotRegistered)?
+                } else {
+                    return Err(ShieldedPoolError::CommitmentNotFound);
+                }
+            };
+            // Verify the proofs
+            let prove_response = CircuitProveResponse {
+                proof,
+                public_inputs: vec![logic_instance.digest().to_be_bytes()],
+                vk: logic_circuit.compute_vk_response.clone(),
+            };
+            let verify_response = logic_circuit
+                .circuit_verify(api, prove_response.clone())
+                .map_err(ShieldedPoolError::BarretenbergError)?;
+            println!("Logic proof verification response: {:?}", verify_response);
+            if !verify_response.verified {
+                return Err(ShieldedPoolError::LogicProof);
+            }
+        }
         Ok(())
     }
 }
@@ -1165,21 +1213,26 @@ impl TransactionBuilder {
 fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let wallet_path = Path::new("wallet.toml");
     let pool_state_path = Path::new("pool_state.bin");
+    // Use the FFI backend which links directly to static libraries
+    let backend = FfiBackend::new().unwrap();
+    // Initialize the Barretenberg API
+    let mut api = BarretenbergApi::new(backend);
     // The state of the shielded pool
-    let mut pool_state = if let Ok(state_bytes) = std::fs::read(pool_state_path) {
+    let mut shielded_pool = if let Ok(state_bytes) = std::fs::read(pool_state_path) {
         ShieldedPool::try_from_slice(&state_bytes)?
     } else {
         ShieldedPool::default()
     };
+    // Load up the transfer authorization circuit from disk
+    let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+    let logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
+    // Register the transfer authorization circuit with the shielded pool
+    shielded_pool.register_logic_circuit(logic_circuit);
     // Attempt to load the wallet, or default to empty if it doesn't exist
     let store = Store::load(wallet_path).unwrap_or_default();
     let mut rng = rand::thread_rng();
     match cli {
         ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
-            // Use the FFI backend which links directly to static libraries
-            let backend = FfiBackend::new().unwrap();
-            // Initialize the Barretenberg API
-            let mut api = BarretenbergApi::new(backend);
             let mut builder = TransactionBuilder::new(&mut api);
             // The resource logic reference is the UltraHonk verification key hash
             let logic_ref = builder.logic_circuit
@@ -1212,7 +1265,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
                 // First synchronize the client state
-                let client_state = ClientState::synchronize(pool_state.clone(), &[spending_key.to_viewing_key()]);
+                let client_state = ClientState::synchronize(shielded_pool.clone(), &[spending_key.to_viewing_key()]);
                 let payment_addr = spending_key.to_viewing_key().to_payment_address();
                 if let Some(note_positions) = client_state.pos_map.get(&spending_key.to_viewing_key()) {
                     for pos in note_positions {
@@ -1291,18 +1344,18 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let (compliance_witness, compliance_instance) = builder.build_compliance_artifacts(&mut rng);
             // Finally update the state of the pool
             for i in 0..builder.consumed_count {
-                pool_state.nullifiers.push(builder.consumed_nullifiers[usize::from(i)]);
+                shielded_pool.nullifiers.push(builder.consumed_nullifiers[usize::from(i)]);
             }
             for i in 0..builder.created_count {
-                pool_state.note_queue.push(builder.created_resources[usize::from(i)]);
+                shielded_pool.note_queue.push(builder.created_resources[usize::from(i)]);
             }
             // Finally build the transaction
             let transaction = builder.build(&mut api, compliance_witness, compliance_instance);
-            pool_state
-                .submit(&mut api, &mut builder.logic_circuit, &mut builder.compliance_circuit, transaction)
+            shielded_pool
+                .submit(&mut api, &mut builder.compliance_circuit, transaction)
                 .expect("Transaction validation failed");
             // Save the updated state
-            let state_bytes = borsh::to_vec(&pool_state)?;
+            let state_bytes = borsh::to_vec(&shielded_pool)?;
             std::fs::write(pool_state_path, state_bytes)?;
         },
         ClientCommands::Approve { rpc, spender, signer, token } => {},

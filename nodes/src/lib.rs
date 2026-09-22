@@ -54,6 +54,7 @@ pub fn init_srs() {
 }
 
 /// Representation of Barretenberg circuit
+#[derive(Debug, Clone)]
 pub struct BarretenbergCircuit {
     /// The aggregation circuit
     pub circuit: CompiledProgram,
