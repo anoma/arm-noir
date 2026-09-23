@@ -1,7 +1,7 @@
 use std::option::Option;
 use std::static_assert;
 use core::{write_bytes, NullifierKey, Resource};
-use std::embedded_curve_ops::{multi_scalar_mul, EmbeddedCurveScalar, EmbeddedCurvePoint};
+use std::embedded_curve_ops::{fixed_base_scalar_mul, multi_scalar_mul, EmbeddedCurveScalar, EmbeddedCurvePoint};
 use std::aes128::aes128_encrypt;
 
 // Constants for bounding unbounded loops and variable-length arrays
@@ -489,13 +489,19 @@ impl TransferAuthWitness {
         for i in 0..encryption_info.encryption_nonce.len() { encryption_nonce[i] = encryption_info.encryption_nonce[i]; }
         let ciphertext = aes128_encrypt(payload_plaintext, encryption_nonce, hash_prefix);
         let mut ciphertext_padded = [0u8; MAX_RESOURCE_CIPHERTEXT_LEN];
-        for i in 0..ciphertext.len() { ciphertext_padded[i] = ciphertext[i]; }
+        let mut offset: u32 = 0;
+        write_bytes(&mut ciphertext_padded, &mut offset, encryption_info.encryption_nonce);
+        write_bytes(&mut ciphertext_padded, &mut offset, [0x04]);
+        let sender_pk = fixed_base_scalar_mul(encryption_info.sender_sk);
+        write_bytes(&mut ciphertext_padded, &mut offset, sender_pk.x.to_be_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+        write_bytes(&mut ciphertext_padded, &mut offset, sender_pk.y.to_be_bytes::<EMBEDDED_CURVE_BASE_FIELD_BYTES>());
+        write_bytes(&mut ciphertext_padded, &mut offset, ciphertext);
 
         let mut app_data = AppData::default();
         // Generate resource_payload
         app_data.resource_payload[0] = ExpirableBlob {
             blob: ciphertext_padded,
-            blob_len: ciphertext.len(),
+            blob_len: offset,
             deletion_criterion: true,
         };
         app_data.resource_payload_len = 1;
@@ -524,8 +530,8 @@ fn test_persistent_consume() {
             logic_ref: [0; DIGEST_BYTES],
             label_ref: [0; DIGEST_BYTES],
             value_ref: [
-                251, 115, 230, 34, 134, 135, 66, 60, 171, 246, 65, 210, 213, 104, 205, 204,
-                207, 125, 253, 189, 44, 24, 199, 126, 89, 234, 46, 24, 182, 164, 120, 101
+                127, 100, 166, 39, 85, 162, 122, 34, 202, 242, 150, 61, 161, 163, 68, 189,
+                34, 24, 117, 228, 6, 212, 12, 57, 246, 47, 237, 84, 165, 140, 105, 53,
             ],
             quantity: 0,
             nonce: [0; 32],
@@ -561,8 +567,8 @@ fn test_persistent_consume() {
     // Execute the main function which triggers _constrain()
     let logic_digest = main(witness);
     assert(logic_digest == Field::from_le_bytes([
-        252, 103, 131, 249, 94, 98, 147, 61, 162, 216, 156, 182, 40, 228, 247, 247,
-        182, 212, 178, 148, 148, 15, 17, 59, 25, 93, 153, 242, 152, 174, 95, 116
+        231, 55, 255, 55, 84, 255, 114, 13, 199, 12, 233, 5, 228, 52, 72, 46,
+        9, 52, 54, 247, 30, 240, 78, 16, 9, 4, 227, 58, 146, 238, 220, 33,
     ]));
 }
 
@@ -577,8 +583,8 @@ fn test_persistent_create() {
                 197, 36, 212, 112, 48, 118, 46, 177, 77, 196, 175, 137, 126, 96, 93, 155
             ],
             value_ref: [
-                232, 189, 44, 167, 37, 59, 242, 117, 69, 20, 246, 67, 159, 172, 198, 103,
-                100, 253, 216, 110, 55, 193, 136, 128, 218, 13, 220, 36, 214, 168, 161, 44
+                145, 125, 108, 226, 176, 45, 216, 10, 89, 58, 221, 126, 129, 65, 107, 75,
+                12, 86, 104, 19, 87, 226, 72, 24, 211, 206, 46, 220, 171, 170, 222, 238,
             ],
             quantity: 0,
             nonce: [0; 32],
@@ -612,8 +618,8 @@ fn test_persistent_create() {
     // Execute the main function which triggers _constrain()
     let logic_digest = main(witness);
     assert(logic_digest == Field::from_le_bytes([
-        156, 48, 139, 117, 185, 218, 114, 133, 235, 229, 247, 18, 172, 167, 166, 246,
-        77, 49, 37, 158, 5, 162, 108, 72, 45, 209, 172, 233, 137, 30, 110, 249
+        152, 67, 97, 157, 206, 101, 162, 166, 215, 221, 218, 58, 229, 89, 101, 246,
+        29, 229, 183, 10, 80, 43, 57, 10, 220, 235, 221, 90, 186, 168, 23, 31,
     ]));
 }
 

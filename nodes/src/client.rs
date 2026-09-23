@@ -24,6 +24,11 @@ use nodes::read_bytes;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use std::io::Write;
 use std::io::Read;
+use elliptic_curve::Curve;
+use elliptic_curve::FieldBytesSize;
+use elliptic_curve::sec1::ModulusSize;
+use std::marker::PhantomData;
+use elliptic_curve::sec1::EncodedPoint;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -41,6 +46,7 @@ const MAX_AUTH_PK_LEN: usize = 65;
 pub const DISCOVERY_PK_LEN: usize = 65;
 pub const DISCOVERY_SHARED_POINT_LEN: usize = 32;
 const DISCOVERY_CIPHERTEXT_LEN: usize = 16;
+const ENCRYPTION_CIPHERTEXT_LEN: usize = 256;
 const MAX_ENCRYPTION_PK_LEN: usize = 65;
 const MAX_AUTH_SIG_LEN: usize = 64;
 const MAX_RESOURCE_CIPHERTEXT_LEN: usize = 340;
@@ -114,17 +120,17 @@ impl<const N: usize> Default for Array<N> {
 pub type Nullifier = [u8; DIGEST_BYTES];
 pub type Commitment = [u8; DIGEST_BYTES];
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Ciphertext {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ciphertext<const CIPHERTEXT_LEN: usize, AffinePoint> {
     // AES GCM encrypted message
-    pub cipher: [u8; DISCOVERY_CIPHERTEXT_LEN],
+    pub cipher: [u8; CIPHERTEXT_LEN],
     // 96-bits; unique per message
     pub nonce: [u8; DISCOVERY_NONCE_LEN],
     // Sender's public key
     pub pk: AffinePoint,
 }
 
-impl Ciphertext {
+impl Ciphertext<DISCOVERY_CIPHERTEXT_LEN, k256::AffinePoint> {
     /// Serializes the Ciphertext into a fixed-length byte array of size `N`.
     /// The layout is: Nonce (12 bytes) | PK (65 bytes) | Cipher Data | Zero Padding
     pub fn to_bytes(&self) -> [u8; DISCOVERY_CIPHERTEXT_LEN + DISCOVERY_NONCE_LEN + DISCOVERY_PK_LEN] {
@@ -148,10 +154,44 @@ impl Ciphertext {
         // 2. Read public key
         let pk_slice: [u8; DISCOVERY_PK_LEN] = read_bytes(bytes, &mut offset);
         let encoded_point = k256::EncodedPoint::from_bytes(&pk_slice).ok()?;
-        let pk = Option::from(k256::AffinePoint::from_encoded_point(&encoded_point))?;
+        let pk = Option::from(AffinePoint::from_encoded_point(&encoded_point))?;
         // 3. Read cipher data
         let cipher = read_bytes(bytes, &mut offset);
-        Some(Self {cipher, nonce, pk, })
+        Some(Self {cipher, nonce, pk })
+    }
+}
+
+impl Ciphertext<ENCRYPTION_CIPHERTEXT_LEN, EmbeddedCurvePoint> {
+    /// Serializes the Ciphertext into a fixed-length byte array of size `N`.
+    /// The layout is: Nonce (12 bytes) | PK (65 bytes) | Cipher Data | Zero Padding
+    pub fn to_bytes(&self) -> [u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_ENCRYPTION_PK_LEN] {
+        let mut bytes = [0u8; _];
+        let mut offset: usize = 0;
+        // 1. Write nonce (12 bytes)
+        write_bytes(&mut bytes, &mut offset, &self.nonce);
+        // 2. Write public key (65 bytes, uncompressed SEC1)
+        write_bytes(&mut bytes, &mut offset, &[0x04]);
+        write_bytes(&mut bytes, &mut offset, &self.pk.x.to_be_bytes());
+        write_bytes(&mut bytes, &mut offset, &self.pk.y.to_be_bytes());
+        // 3. Write cipher data (remaining bytes are implicitly zero-padded)
+        write_bytes(&mut bytes, &mut offset, &self.cipher);
+        bytes
+    }
+
+    /// Deserializes a Ciphertext from a fixed-length byte array of size `N`.
+    pub fn from_bytes(bytes: &[u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_ENCRYPTION_PK_LEN]) -> Option<Self> {
+        let mut offset: usize = 0;
+        // 1. Read nonce
+        let nonce = read_bytes(bytes, &mut offset);
+        // 2. Read public key
+        if read_bytes(bytes, &mut offset) != [0x04; 1] {
+            return None;
+        }
+        let pk_slice: [u8; MAX_ENCRYPTION_PK_LEN-1] = read_bytes(bytes, &mut offset);
+        let pk = EmbeddedCurvePoint::from_bytes(&pk_slice);
+        // 3. Read cipher data
+        let cipher = read_bytes(bytes, &mut offset);
+        Some(Self {cipher, nonce, pk })
     }
 }
 

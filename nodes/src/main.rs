@@ -88,6 +88,7 @@ use client::Ciphertext;
 use barretenberg_rs::generated_types::CircuitProveResponse;
 use barretenberg_rs::BarretenbergError;
 use client::Commitment;
+use std::marker::PhantomData;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -401,8 +402,6 @@ enum ShieldedPoolError {
 // State of the shielded pool
 #[derive(Default, BorshSerialize, BorshDeserialize, Clone)]
 struct ShieldedPool {
-    // Nodes in the pool
-    note_queue: Vec<Resource>,
     // Nullifiers in the pool
     nullifiers: BTreeSet<Nullifier>,
     // Resource commitments in the pool
@@ -537,8 +536,13 @@ impl ClientState {
     fn synchronize(pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
         let mut state = Self::default();
         // Scan the notes in the queue
-        for resource in pool.note_queue {
-            state.note_map.insert(state.current_pos, resource);
+        for transaction in pool.transactions {
+            for (logic_instance, _) in transaction.logic_instances {
+                let app_data = logic_instance.app_data;
+                for i in 0..app_data.discovery_payload_len {
+                }
+            }
+            /*state.note_map.insert(state.current_pos, resource);
             for fvk in fvks {
                 if resource.nk_commitment == fvk.nullifier_key.commit().0 {
                     let nullifier_key = client::NullifierKey { bytes: fvk.nullifier_key.0 };
@@ -548,7 +552,7 @@ impl ClientState {
                     break;
                 }
             }
-            state.current_pos += 1;
+            state.current_pos += 1;*/
         }
         // Scan the nullifier in the queue
         for nullifier in pool.nullifiers {
@@ -984,7 +988,7 @@ impl TransactionBuilder {
         let discovery_ciphertext = Ciphertext {
             cipher: discovery_ciphertext.try_into().unwrap(),
             nonce: discovery_nonce,
-            pk: discovery_sk.public_key().into(),
+            pk: k256::AffinePoint::from(discovery_sk.public_key()),
         }.to_bytes();
         // Generate encryption ciphertext
         let sender_sk = EmbeddedCurveScalar::random(rng);
@@ -993,6 +997,11 @@ impl TransactionBuilder {
         encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&value_info.encryption_pk.to_bytes());
         encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&shared_point.to_bytes());
         let (resource_ciphertext, encryption_nonce) = Self::encrypt(api, rng, payload_plaintext, &encryption_concat);
+        let resource_ciphertext = Ciphertext {
+            cipher: resource_ciphertext.try_into().unwrap(),
+            nonce: encryption_nonce,
+            pk: EmbeddedCurvePoint::generator() * sender_sk,
+        }.to_bytes();
         let encryption_info = EncryptionInfo {
             discovery_ciphertext: Self::pad_slice(&discovery_ciphertext),
             discovery_ciphertext_len: discovery_ciphertext.len() as u32,
@@ -1369,10 +1378,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 builder.add_output(&mut api, witness, logic_instance, compliance_public);
             }
             let (compliance_witness, compliance_instance) = builder.build_compliance_artifacts(&mut rng);
-            // Finally update the state of the pool
-            for i in 0..builder.created_count {
-                shielded_pool.note_queue.push(builder.created_resources[usize::from(i)]);
-            }
             // Finally build the transaction
             let transaction = builder.build(&mut api, compliance_witness, compliance_instance);
             shielded_pool

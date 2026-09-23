@@ -3951,6 +3951,7 @@ dependencies = [
  "borsh",
  "borsh-derive",
  "clap",
+ "elliptic-curve 0.13.8",
  "flate2",
  "k256 0.13.4",
  "nargo",
