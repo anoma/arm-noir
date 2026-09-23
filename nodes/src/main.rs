@@ -89,6 +89,7 @@ use barretenberg_rs::generated_types::CircuitProveResponse;
 use barretenberg_rs::BarretenbergError;
 use client::Commitment;
 use std::marker::PhantomData;
+use client::DISCOVERY_CIPHERTEXT_LEN;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -97,6 +98,7 @@ const ERC20_TOKEN_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
 const MAX_ENCRYPTION_PK_LEN: usize = 64;
 const MAX_OUTPUT_LEN: usize = 64;
+const AES_KEY_LEN: usize = 16;
 pub static INITIAL_ROOT: [u8; 32] =
         hex!("cc1d2f838445db7aec431df9ee8a871f40e7aa5e064fc056633ef8c60fab7b06");
 
@@ -400,7 +402,7 @@ enum ShieldedPoolError {
 }
 
 // State of the shielded pool
-#[derive(Default, BorshSerialize, BorshDeserialize, Clone)]
+#[derive(Default, BorshSerialize, BorshDeserialize, Clone, Debug)]
 struct ShieldedPool {
     // Nullifiers in the pool
     nullifiers: BTreeSet<Nullifier>,
@@ -430,7 +432,7 @@ impl ShieldedPool {
     ) -> Result<(), ShieldedPoolError> {
         // Check the compliance proof
         let compliance_prove_response = CircuitProveResponse {
-            proof: tx.compliance_proof,
+            proof: tx.compliance_proof.clone(),
             public_inputs: vec![tx.compliance_instance.digest().to_be_bytes()],
             vk: compliance_circuit.compute_vk_response.clone(),
         };
@@ -500,7 +502,7 @@ impl ShieldedPool {
             return Err(ShieldedPoolError::UnpairedCommitment);
         }
         // Update the nullifier set
-        for (logic_instance, _proof) in tx.logic_instances {
+        for (logic_instance, _proof) in &tx.logic_instances {
             if logic_instance.is_consumed {
                 // Handle nullification
                 if self.nullifiers.contains(&logic_instance.tag) {
@@ -513,8 +515,17 @@ impl ShieldedPool {
                 self.commitments.push(logic_instance.tag);
             }
         }
+        // Record the transaction
+        self.transactions.push(tx);
         Ok(())
     }
+}
+
+// Pad the given slice to the given array length
+fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
+    let mut dest = [0u8; M];
+    dest[..src.len()].copy_from_slice(src);
+    dest
 }
 
 // The client's view of the shielded pool
@@ -525,7 +536,7 @@ struct ClientState {
     // Map nullifiers to note positions they nullify
     nf_map: HashMap<Nullifier, u64>,
     // Map note position to notes
-    note_map: BTreeMap<u64, Resource>,
+    note_map: BTreeMap<u64, ResourceWithLabel>,
     // Set of spent note positions
     spent_notes: BTreeSet<u64>,
     // The pool's current position
@@ -533,28 +544,103 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn synchronize(pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
+    fn synchronize<B: Backend>(api: &mut BarretenbergApi<B>, pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
         let mut state = Self::default();
         // Scan the notes in the queue
         for transaction in pool.transactions {
             for (logic_instance, _) in transaction.logic_instances {
+                // Process only created resources
+                if logic_instance.is_consumed { continue; }
                 let app_data = logic_instance.app_data;
                 for i in 0..app_data.discovery_payload_len {
+                    // Attempt to deserialize resource ciphertext
+                    let resource_payload = app_data.resource_payload[i as usize];
+                    let Some(resource_ciphertext) = Ciphertext::<_, EmbeddedCurvePoint>::from_bytes(
+                        &resource_payload.blob[..resource_payload.blob_len as usize],
+                    ) else {
+                        continue;
+                    };
+                    // Attempt to deserialize discovery ciphertext
+                    let discovery_payload = app_data.discovery_payload[i as usize];
+                    let Some(discovery_ciphertext) = Ciphertext::<_, k256::AffinePoint>::from_bytes(
+                        &discovery_payload.blob[..discovery_payload.blob_len as usize],
+                    ) else {
+                        continue;
+                    };
+                    for fvk in fvks {
+                        // Attempt to decrypt discovery payload
+                        let discovery_shared_point = diffie_hellman(fvk.discovery_secret_key.to_nonzero_scalar(), discovery_ciphertext.pk);
+                        let discovery_public_key = fvk.discovery_secret_key.public_key().to_encoded_point(false);
+                        let mut discovery_concat = [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
+                        discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(&discovery_public_key.as_bytes());
+                        discovery_concat[DISCOVERY_PK_LEN..].copy_from_slice(&discovery_shared_point.raw_secret_bytes());
+                        let key = &keccak256(discovery_concat)[..AES_KEY_LEN];
+                        let nonce_padded = pad_slice::<16>(&discovery_ciphertext.nonce);
+                        let plaintext = api.aes_decrypt(
+                            &discovery_ciphertext.cipher,
+                            &nonce_padded,
+                            key,
+                            discovery_ciphertext.cipher.len() as u32,
+                        )
+                            .expect("unable to perform AES decryption")
+                            .plaintext;
+                        // Padding scheme does not allow empty plaintexts
+                        if plaintext.len() == 0 { continue }
+                        // Grab the filler byte
+                        let remainder = plaintext[plaintext.len() - 1];
+                        // Ensure that the filler byte from the acceptable range
+                        if remainder == 0 || remainder > 16 || usize::from(remainder) > plaintext.len() { continue }
+                        // Ensure that the filler byte is consistently applied
+                        if plaintext[plaintext.len() - usize::from(remainder)..].iter().any(|&b| b != remainder) {
+                            continue;
+                        }
+                        // Finally, remove the padding
+                        let plaintext = &plaintext[..plaintext.len() - usize::from(remainder)];
+
+                        // Malformed payload, so skip resource decryption
+                        if plaintext != [0x00] { continue }
+
+                        // Attempt to decrypt resource payload
+                        let resource_shared_point = resource_ciphertext.pk * fvk.encryption_secret_key;
+                        let encryption_pk = EmbeddedCurvePoint::generator() * fvk.encryption_secret_key;
+                        let mut encryption_concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
+                        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&encryption_pk.to_bytes());
+                        encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&resource_shared_point.to_bytes());
+                        let key = &keccak256(encryption_concat)[..AES_KEY_LEN];
+                        let nonce_padded = pad_slice::<16>(&resource_ciphertext.nonce);
+                        let plaintext = api.aes_decrypt(
+                            &resource_ciphertext.cipher,
+                            &nonce_padded,
+                            key,
+                            resource_ciphertext.cipher.len() as u32,
+                        )
+                            .expect("unable to perform AES decryption")
+                            .plaintext;
+                        let remainder = plaintext[plaintext.len() - 1];
+                        let plaintext = &plaintext[..plaintext.len() - usize::from(remainder)];
+
+                        // Deserialize and store the decrypted resource
+                        let Ok(resource) = ResourceWithLabel::try_from_slice(&plaintext) else { continue };
+                        state.note_map.insert(state.current_pos, resource);
+                    }
                 }
+                // Update the note counter
+                state.current_pos += 1;
             }
-            /*state.note_map.insert(state.current_pos, resource);
+        }
+        // Pre-compute the resource nullifiers
+        for (current_pos, resource) in &state.note_map {
             for fvk in fvks {
-                if resource.nk_commitment == fvk.nullifier_key.commit().0 {
+                if resource.resource.nk_commitment == fvk.nullifier_key.commit().0 {
                     let nullifier_key = client::NullifierKey { bytes: fvk.nullifier_key.0 };
-                    let nullifier = resource.nullifier(nullifier_key);
-                    state.nf_map.insert(nullifier, state.current_pos);
-                    state.pos_map.entry(fvk.clone()).or_default().insert(state.current_pos);
+                    let nullifier = resource.resource.nullifier(nullifier_key);
+                    state.nf_map.insert(nullifier, *current_pos);
+                    state.pos_map.entry(fvk.clone()).or_default().insert(*current_pos);
                     break;
                 }
             }
-            state.current_pos += 1;*/
         }
-        // Scan the nullifier in the queue
+        // Scan the nullifiers in the queue
         for nullifier in pool.nullifiers {
             if let Some(pos) = state.nf_map.get(&nullifier) {
                 state.spent_notes.insert(*pos);
@@ -920,17 +1006,10 @@ impl TransactionBuilder {
         let remainder = 16 - (plaintext.len() % 16);
         plaintext.resize(plaintext.len() + remainder, remainder as u8);
         // Finally do the encryptiion
-        let ciphertext = api.aes_encrypt(&plaintext, &nonce_padded, &hash[..16], plaintext.len() as u32)
+        let ciphertext = api.aes_encrypt(&plaintext, &nonce_padded, &hash[..AES_KEY_LEN], plaintext.len() as u32)
             .expect("unable to perform AES encryption")
             .ciphertext;
         (ciphertext, nonce)
-    }
-
-    // Pad the given slice to the given array length
-    fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
-        let mut dest = [0u8; M];
-        dest[..src.len()].copy_from_slice(src);
-        dest
     }
 
     fn build_shielded_output<B: Backend>(
@@ -971,11 +1050,11 @@ impl TransactionBuilder {
             label_ref,
             nk_commitment: payment_addr.nullifier_key_commitment.0,
         };
-        let payload_plaintext = ResourceWithLabel {
+        let payload_plaintext = borsh::to_vec(&ResourceWithLabel {
             resource: resource,
             forwarder_addr: label_info.forwarder_addr,
             erc20_token_addr: label_info.erc20_token_addr,
-        }.to_bytes().to_vec();
+        }).expect("Unable to serialize resource");
         // The action root
         let action_root = [0u8; DIGEST_BYTES];
         // Generate discovery ciphertext
@@ -1003,7 +1082,7 @@ impl TransactionBuilder {
             pk: EmbeddedCurvePoint::generator() * sender_sk,
         }.to_bytes();
         let encryption_info = EncryptionInfo {
-            discovery_ciphertext: Self::pad_slice(&discovery_ciphertext),
+            discovery_ciphertext: pad_slice(&discovery_ciphertext),
             discovery_ciphertext_len: discovery_ciphertext.len() as u32,
             encryption_nonce,
             sender_sk,
@@ -1024,14 +1103,14 @@ impl TransactionBuilder {
         let mut app_data = AppData::default();
         // Generate resource_payload
         app_data.resource_payload[0] = ExpirableBlob {
-            blob: Self::pad_slice(&resource_ciphertext),
+            blob: pad_slice(&resource_ciphertext),
             blob_len: resource_ciphertext.len() as u32,
             deletion_criterion: true,
         };
         app_data.resource_payload_len = 1;
         // Generate discovery_payload
         app_data.discovery_payload[0] = ExpirableBlob {
-            blob: Self::pad_slice(&discovery_ciphertext),
+            blob: pad_slice(&discovery_ciphertext),
             blob_len: discovery_ciphertext.len() as u32,
             deletion_criterion: true,
         };
@@ -1301,7 +1380,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
                 // First synchronize the client state
-                let client_state = ClientState::synchronize(shielded_pool.clone(), &[spending_key.to_viewing_key()]);
+                let client_state = ClientState::synchronize(&mut api, shielded_pool.clone(), &[spending_key.to_viewing_key()]);
                 let payment_addr = spending_key.to_viewing_key().to_payment_address();
                 if let Some(note_positions) = client_state.pos_map.get(&spending_key.to_viewing_key()) {
                     for pos in note_positions {
@@ -1311,12 +1390,12 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         }
                         // Get the note
                         let note = client_state.note_map.get(pos).expect("Missing note");
-                        if !(note.logic_ref == logic_ref && note.label_ref == label_ref) {
+                        if !(note.resource.logic_ref == logic_ref && note.resource.label_ref == label_ref) {
                             continue;
                         }
-                        value_acc += note.quantity;
+                        value_acc += note.resource.quantity;
                         let (logic_witness, compliance_witness, logic_instance, compliance_public) =
-                            TransactionBuilder::build_shielded_input(&mut api, spending_key.clone(), note.clone());
+                            TransactionBuilder::build_shielded_input(&mut api, spending_key.clone(), note.resource.clone());
                         builder.add_input(&mut api, logic_witness, compliance_witness, logic_instance, compliance_public);
                     }
                 }

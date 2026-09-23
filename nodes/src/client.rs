@@ -45,8 +45,8 @@ pub const MAX_ETH_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
 pub const DISCOVERY_PK_LEN: usize = 65;
 pub const DISCOVERY_SHARED_POINT_LEN: usize = 32;
-const DISCOVERY_CIPHERTEXT_LEN: usize = 16;
-const ENCRYPTION_CIPHERTEXT_LEN: usize = 256;
+pub const DISCOVERY_CIPHERTEXT_LEN: usize = 16;
+pub const ENCRYPTION_CIPHERTEXT_LEN: usize = 256;
 const MAX_ENCRYPTION_PK_LEN: usize = 65;
 const MAX_AUTH_SIG_LEN: usize = 64;
 const MAX_RESOURCE_CIPHERTEXT_LEN: usize = 340;
@@ -147,7 +147,7 @@ impl Ciphertext<DISCOVERY_CIPHERTEXT_LEN, k256::AffinePoint> {
     }
 
     /// Deserializes a Ciphertext from a fixed-length byte array of size `N`.
-    pub fn from_bytes(bytes: &[u8; DISCOVERY_CIPHERTEXT_LEN + DISCOVERY_NONCE_LEN + DISCOVERY_PK_LEN]) -> Option<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut offset: usize = 0;
         // 1. Read nonce
         let nonce = read_bytes(bytes, &mut offset);
@@ -179,7 +179,7 @@ impl Ciphertext<ENCRYPTION_CIPHERTEXT_LEN, EmbeddedCurvePoint> {
     }
 
     /// Deserializes a Ciphertext from a fixed-length byte array of size `N`.
-    pub fn from_bytes(bytes: &[u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_ENCRYPTION_PK_LEN]) -> Option<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut offset: usize = 0;
         // 1. Read nonce
         let nonce = read_bytes(bytes, &mut offset);
@@ -187,8 +187,9 @@ impl Ciphertext<ENCRYPTION_CIPHERTEXT_LEN, EmbeddedCurvePoint> {
         if read_bytes(bytes, &mut offset) != [0x04; 1] {
             return None;
         }
-        let pk_slice: [u8; MAX_ENCRYPTION_PK_LEN-1] = read_bytes(bytes, &mut offset);
-        let pk = EmbeddedCurvePoint::from_bytes(&pk_slice);
+        let x = FieldElement::from_be_bytes_reduce(&read_bytes::<BASE_FIELD_BYTES>(bytes, &mut offset));
+        let y = FieldElement::from_be_bytes_reduce(&read_bytes::<BASE_FIELD_BYTES>(bytes, &mut offset));
+        let pk = EmbeddedCurvePoint { x, y };
         // 3. Read cipher data
         let cipher = read_bytes(bytes, &mut offset);
         Some(Self {cipher, nonce, pk })
@@ -210,10 +211,10 @@ pub struct Resource {
     pub nonce: [u8; DIGEST_BYTES],
     /// commitment to nullifier key
     pub nk_commitment: [u8; DIGEST_BYTES],
-    /// flag that reflects the resource ephemerality
-    pub is_ephemeral: bool,
     /// randomness seed used to derive whatever randomness needed
     pub rand_seed: [u8; DIGEST_BYTES],
+    /// flag that reflects the resource ephemerality
+    pub is_ephemeral: bool,
 }
 
 impl From<Resource> for InputValue {
@@ -265,7 +266,7 @@ impl Resource {
         keccak256(bytes).0
     }
     
-    fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
+    fn commitment_preimage(self) -> [u8; RESOURCE_BYTES] {
         // Concatenate all the components of this resource
         let mut bytes = [0; RESOURCE_BYTES];
         let mut offset: usize = 0;
@@ -294,7 +295,7 @@ impl Resource {
     /// Compute the commitment to the resource
     pub fn commitment(self) -> [u8; DIGEST_BYTES] {
         // Now produce the hash
-        keccak256(self.to_bytes()).0
+        keccak256(self.commitment_preimage()).0
     }
 
     /// Compute the nullifier of the resource
@@ -369,28 +370,13 @@ impl Resource {
 }
 
 /// The struct encoded in the resource payload for persistent created resources.
+#[derive(Deserialize, Serialize, Clone, Copy, Default, BorshSerialize, BorshDeserialize, Debug)]
 pub struct ResourceWithLabel {
     pub resource: Resource,
     /// Address of the forwarder contract for this resource.
     pub forwarder_addr: [u8; MAX_FORWARDER_ADDR_LEN],
     /// Address of the wrapped token within this resource (e.g. USDC).
     pub erc20_token_addr: [u8; MAX_ERC20_TOKEN_ADDR_LEN],
-}
-
-impl ResourceWithLabel {
-    pub fn to_bytes(self) -> [u8; RESOURCE_WITH_LABEL_BYTES] {
-        // Concatenate all the components of this resource
-        let mut bytes = [0; RESOURCE_WITH_LABEL_BYTES];
-        let mut offset: usize = 0;
-        // Write the resource bytes
-        write_bytes(&mut bytes, &mut offset, &self.resource.to_bytes());
-        // Write the forwarder address bytes
-        write_bytes(&mut bytes, &mut offset, &self.forwarder_addr);
-        // Write the token address bytes
-        write_bytes(&mut bytes, &mut offset, &self.erc20_token_addr);
-        assert_eq!(offset, RESOURCE_WITH_LABEL_BYTES, "resource with label bytes malformed");
-        bytes
-    }
 }
 
 /// Nullifier key

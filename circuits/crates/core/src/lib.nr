@@ -119,8 +119,33 @@ impl Resource {
         static_assert(offset == RCM_BYTES, "resource rcm pre-image malformed");
         keccak256::keccak256(bytes, RCM_BYTES)
     }
-    
+
     pub fn to_bytes(self) -> [u8; RESOURCE_BYTES] {
+        // Concatenate all the components of this resource
+        let mut bytes = [0; RESOURCE_BYTES];
+        let mut offset: u32 = 0;
+        // Write the image ID bytes
+        write_bytes(&mut bytes, &mut offset, self.logic_ref);
+        // Write the label_ref bytes
+        write_bytes(&mut bytes, &mut offset, self.label_ref);
+        // Write the fungible value_ref bytes
+        write_bytes(&mut bytes, &mut offset, self.value_ref);
+        // Write the quantity bytes
+        let q_bytes = (self.quantity as Field).to_le_bytes::<QUANTITY_BYTES>();
+        write_bytes(&mut bytes, &mut offset, q_bytes);
+        // Write the nonce bytes
+        write_bytes(&mut bytes, &mut offset, self.nonce);
+        // Write the nullifier public key bytes
+        write_bytes(&mut bytes, &mut offset, self.nk_commitment);
+        // Write the randomness seed bytes
+        write_bytes(&mut bytes, &mut offset, self.rand_seed);
+        // Write the ephemeral flag
+        write_bytes(&mut bytes, &mut offset, [self.is_ephemeral as u8]);
+        static_assert(offset == RESOURCE_BYTES, "resource bytes malformed");
+        bytes
+    }
+    
+    pub fn commitment_preimage(self) -> [u8; RESOURCE_BYTES] {
         // Concatenate all the components of this resource
         let mut bytes = [0; RESOURCE_BYTES];
         let mut offset: u32 = 0;
@@ -149,7 +174,7 @@ impl Resource {
     /// Compute the commitment to the resource
     pub fn commitment(self) -> [u8; DIGEST_BYTES] {
         // Now produce the hash
-        keccak256::keccak256(self.to_bytes(), RESOURCE_BYTES)
+        keccak256::keccak256(self.commitment_preimage(), RESOURCE_BYTES)
     }
 
     /// Compute the nullifier of the resource
