@@ -49,7 +49,7 @@ pub trait Hashable<Ctx>: Clone + Copy {
 }
 
 /// A node within the Sapling commitment tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default, Ord, PartialOrd)]
 #[repr(transparent)]
 pub struct Node {
     // Big endian representation of node
@@ -114,9 +114,9 @@ impl<B: Backend> Hashable<BarretenbergApi<B>> for Node {
 
 /// An immutable commitment tree
 #[derive(Clone, Debug, Default)]
-pub struct FrozenCommitmentTree<Node>(Vec<Node>, usize, Vec<Node>);
+pub struct CommitmentTree<Node>(Vec<Node>, usize, Vec<Node>);
 
-impl<Node: Clone> FrozenCommitmentTree<Node> {
+impl<Node: Clone> CommitmentTree<Node> {
     /// Construct a commitment tree with the given leaf nodes
     pub fn new<B: Backend>(api: &mut BarretenbergApi<B>, leafs: &[Node]) -> Self where Node: Hashable<BarretenbergApi<B>> {
         // This capacity is sufficient to hold a Merkle tree (where an empty node
@@ -130,7 +130,7 @@ impl<Node: Clone> FrozenCommitmentTree<Node> {
     /// Merge the n-1 full Merkle trees with the last possibly unfilled one. All
     /// full trees must have the same size which must be a power of 2 and the
     /// tree must be smaller than this size.
-    pub fn merge<B: Backend>(api: &mut BarretenbergApi<B>, subtrees: &[FrozenCommitmentTree<Node>]) -> Self where Node: Hashable<BarretenbergApi<B>> {
+    pub fn merge<B: Backend>(api: &mut BarretenbergApi<B>, subtrees: &[CommitmentTree<Node>]) -> Self where Node: Hashable<BarretenbergApi<B>> {
         if subtrees.is_empty() {
             return Self(Vec::new(), 0, Vec::new());
         } else if subtrees.len() == 1 {
@@ -269,13 +269,13 @@ impl<Node: Clone> FrozenCommitmentTree<Node> {
     }
 }
 
-impl<Node: BorshSerialize> BorshSerialize for FrozenCommitmentTree<Node> {
+impl<Node: BorshSerialize> BorshSerialize for CommitmentTree<Node> {
     fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         (&self.0, self.1).serialize(writer)
     }
 }
 
-impl<Node: BorshDeserialize> BorshDeserialize for FrozenCommitmentTree<Node> {
+impl<Node: BorshDeserialize> BorshDeserialize for CommitmentTree<Node> {
     fn deserialize_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
         let tup: (Vec<Node>, usize) = BorshDeserialize::deserialize_reader(reader)?;
         Ok(Self(tup.0, tup.1, Default::default()))

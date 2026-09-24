@@ -91,6 +91,8 @@ use barretenberg_rs::BarretenbergError;
 use client::Commitment;
 use std::marker::PhantomData;
 use client::DISCOVERY_CIPHERTEXT_LEN;
+use merkle::Node;
+use merkle::CommitmentTree;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -101,7 +103,7 @@ const MAX_ENCRYPTION_PK_LEN: usize = 64;
 const MAX_OUTPUT_LEN: usize = 64;
 const AES_KEY_LEN: usize = 16;
 pub static INITIAL_ROOT: [u8; 32] =
-        hex!("cc1d2f838445db7aec431df9ee8a871f40e7aa5e064fc056633ef8c60fab7b06");
+        hex!("c9d5969b3cbdef3fe2f655d5b7644da065f6adab6e612236932bfc4412f46308");
 
 /// CLI interface for the UltraHonk based AnomaPay implementation
 #[derive(Parser)]
@@ -400,23 +402,39 @@ enum ShieldedPoolError {
     UnpairedNullifier,
     UnpairedCommitment,
     CircuitNotRegistered,
+    NonExistentAnchor,
 }
 
 // State of the shielded pool
-#[derive(Default, BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 struct ShieldedPool {
     // Nullifiers in the pool
     nullifiers: BTreeSet<Nullifier>,
     // Resource commitments in the pool
-    commitments: Vec<Commitment>,
+    commitments: Vec<Node>,
     // Transactions in the pool
     transactions: Vec<Transaction>,
+    // Historical anchors
+    anchors: BTreeSet<Node>,
     // Registered logic circuits
     #[borsh(skip)]
     logic_circuits: BTreeMap<Vec<u8>, BarretenbergCircuit>,
 }
 
 impl ShieldedPool {
+    fn new<B: Backend>(api: &mut BarretenbergApi<B>) -> Self {
+        // Include an anchor for the empty tree
+        let mut anchors = BTreeSet::default();
+        anchors.insert(CommitmentTree::new(api, &[]).root(api));
+        ShieldedPool {
+            anchors,
+            nullifiers: BTreeSet::default(),
+            commitments: Vec::default(),
+            transactions: Vec::default(),
+            logic_circuits: BTreeMap::default(),
+        }
+    }
+    
     fn register_logic(&mut self, logic_circuit: BarretenbergCircuit) {
         self.logic_circuits.insert(logic_circuit.compute_vk_response.hash.clone(), logic_circuit);
     }
@@ -451,6 +469,8 @@ impl ShieldedPool {
             let consumed_public = tx.compliance_instance.consumed_publics[i as usize];
             if nullifiers.contains_key(&consumed_public.resource_nullifier) {
                 return Err(ShieldedPoolError::DuplicateNullifier);
+            } else if !self.anchors.contains(&Node::new(consumed_public.commitment_tree_root)) {
+                return Err(ShieldedPoolError::NonExistentAnchor);
             } else {
                 nullifiers.insert(consumed_public.resource_nullifier, consumed_public.resource_logic_ref);
             }
@@ -513,9 +533,11 @@ impl ShieldedPool {
                 }
             } else {
                 // Update the Merkle tree
-                self.commitments.push(logic_instance.tag);
+                self.commitments.push(Node::new(logic_instance.tag));
             }
         }
+        // Compute the new Merkle root
+        self.anchors.insert(CommitmentTree::new(api, &self.commitments).root(api));
         // Record the transaction
         self.transactions.push(tx);
         Ok(())
@@ -532,6 +554,8 @@ fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
 // The client's view of the shielded pool
 #[derive(Default, BorshSerialize, BorshDeserialize, Debug)]
 struct ClientState {
+    // The state of the current commitment tree
+    tree: CommitmentTree<Node>,
     // Map viewing keys to the notes they own
     pos_map: HashMap<ExtendedFullViewingKey, BTreeSet<u64>>,
     // Map nullifiers to note positions they nullify
@@ -547,6 +571,8 @@ struct ClientState {
 impl ClientState {
     fn synchronize<B: Backend>(api: &mut BarretenbergApi<B>, pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
         let mut state = Self::default();
+        // Track the encountered resource commitments
+        let mut commitments = vec![];
         // Scan the notes in the queue
         for transaction in pool.transactions {
             for (logic_instance, _) in transaction.logic_instances {
@@ -625,10 +651,14 @@ impl ClientState {
                         state.note_map.insert(state.current_pos, resource);
                     }
                 }
+                // Record the encountered resource commitment
+                commitments.push(Node::new(logic_instance.tag));
                 // Update the note counter
                 state.current_pos += 1;
             }
         }
+        // Finally construct the tree
+        state.tree = CommitmentTree::new(api, &commitments);
         // Pre-compute the resource nullifiers
         for (current_pos, resource) in &state.note_map {
             for fvk in fvks {
@@ -827,8 +857,10 @@ impl TransactionBuilder {
 
     fn build_shielded_input<B: Backend>(
         api: &mut BarretenbergApi<B>,
+        tree: &mut CommitmentTree<Node>,
         spending_key: ExtendedSpendingKey,
         note: Resource,
+        position: usize,
     ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
         // The value info
         let payment_addr = spending_key.to_viewing_key().to_payment_address();
@@ -852,12 +884,19 @@ impl TransactionBuilder {
             auth_sig: Some(auth_sig.to_bytes().into()),
             forwarder_info: None,
         };
+        // Convert the Merkle path into the circuit's format
+        let path = tree.path(api, position);
+        let mut circuit_path = [(FieldElement::zero(), false); MAX_TREE_DEPTH];
+        for (depth, sibling) in path.auth_path.iter().enumerate() {
+            circuit_path[depth].0 = sibling.0.into_scalar();
+            circuit_path[depth].1 = sibling.1;
+        }
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
             resource: logic_witness.resource,
             nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
             cm_merkle_path: MerklePath {
-                path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
+                path: circuit_path,
                 depth: MAX_TREE_DEPTH,
             },
         };
@@ -1337,7 +1376,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let mut shielded_pool = if let Ok(state_bytes) = std::fs::read(pool_state_path) {
         ShieldedPool::try_from_slice(&state_bytes)?
     } else {
-        ShieldedPool::default()
+        ShieldedPool::new(&mut api)
     };
     // Load up the transfer authorization circuit from disk
     let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
@@ -1381,7 +1420,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
                 // First synchronize the client state
-                let client_state = ClientState::synchronize(&mut api, shielded_pool.clone(), &[spending_key.to_viewing_key()]);
+                let mut client_state = ClientState::synchronize(&mut api, shielded_pool.clone(), &[spending_key.to_viewing_key()]);
                 let payment_addr = spending_key.to_viewing_key().to_payment_address();
                 if let Some(note_positions) = client_state.pos_map.get(&spending_key.to_viewing_key()) {
                     for pos in note_positions {
@@ -1396,7 +1435,13 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         }
                         value_acc += note.resource.quantity;
                         let (logic_witness, compliance_witness, logic_instance, compliance_public) =
-                            TransactionBuilder::build_shielded_input(&mut api, spending_key.clone(), note.resource.clone());
+                            TransactionBuilder::build_shielded_input(
+                                &mut api,
+                                &mut client_state.tree,
+                                spending_key.clone(),
+                                note.resource.clone(),
+                                *pos as usize,
+                            );
                         builder.add_input(&mut api, logic_witness, compliance_witness, logic_instance, compliance_public);
                     }
                 }
