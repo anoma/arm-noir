@@ -1,6 +1,7 @@
 pub mod aggregator;
 pub mod client;
 pub mod wallet;
+pub mod merkle;
 
 use nodes::init_srs;
 use clap::{Parser, Args, Subcommand};
