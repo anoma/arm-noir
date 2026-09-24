@@ -395,6 +395,7 @@ impl From<NullifierKey> for InputValue {
 }
 
 /// ValueInfo holds information about value plaintext
+#[derive(Copy, Clone)]
 pub struct ValueInfo {
     /// The authorization verifying key corresponds to the resource.value.owner
     pub auth_pk: [u8; MAX_AUTH_PK_LEN],
@@ -497,6 +498,7 @@ impl From<ForwarderInfo> for InputValue {
 
 /// The TokenTransferWitness holds all the information necessary to generate a proof of the
 /// resource logic of a given resource.
+#[derive(Copy, Clone, Default)]
 pub struct TransferAuthWitness {
     /// Resource this witness is about.
     pub resource: Resource,
@@ -537,6 +539,7 @@ impl From<TransferAuthWitness> for InputValue {
 
 /// The EncryptionInfo struct holds information about the encryption keys for the
 /// recipient/sender of a resource in a transaction.
+#[derive(Copy, Clone)]
 pub struct EncryptionInfo {
     /// Secret key. randomly generated for persistent resource_ciphertext
     pub sender_sk: EmbeddedCurveScalar,
@@ -698,7 +701,7 @@ impl From<CreatedResourcePublic> for InputValue {
 /// A point on the embedded elliptic curve
 /// By definition, the base field of the embedded curve is the scalar field of the proof system curve, i.e the Noir Field.
 /// x and y denotes the Weierstrass coordinates of the point.
-#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug, Copy, Clone)]
+#[derive(Eq, Hash, PartialEq, Ord, PartialOrd, Debug, Copy, Clone, Default)]
 pub struct EmbeddedCurvePoint {
     pub x: FieldElement,
     pub y: FieldElement,
@@ -856,7 +859,7 @@ impl ComplianceInstance {
 /// Scalar for the embedded curve represented as low and high limbs
 /// By definition, the scalar field of the embedded curve is base field of the proving system curve.
 /// It may not fit into a Field element, so it is represented with two Field elements; its low and high limbs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct EmbeddedCurveScalar {
     pub lo: FieldElement,
     pub hi: FieldElement,

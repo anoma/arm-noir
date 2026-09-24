@@ -798,12 +798,14 @@ struct TransactionBuilder {
     consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
     consumed_logics: [ResourceLogicInstance; MAX_CONSUMED],
     consumed_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
+    consumed_witnesses: [TransferAuthWitness; MAX_CONSUMED],
     consumed_count: u8,
     // The created data
     created_resources: [Resource; MAX_CREATED],
     created_publics: [CreatedResourcePublic; MAX_CREATED],
     created_logics: [ResourceLogicInstance; MAX_CREATED],
     created_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
+    created_witnesses: [TransferAuthWitness; MAX_CONSUMED],
     created_count: u8,
     // Quantity delta
     delta_map: BTreeMap<EmbeddedCurvePoint, SignMagnitude<u128>>,
@@ -829,11 +831,13 @@ impl TransactionBuilder {
             consumed_publics: Default::default(),
             consumed_logics: Default::default(),
             consumed_logic_proofs: Default::default(),
+            consumed_witnesses: Default::default(),
             consumed_count: 0,
             created_resources: Default::default(),
             created_publics: Default::default(),
             created_logics: Default::default(),
             created_logic_proofs: Default::default(),
+            created_witnesses: Default::default(),
             created_count: 0,
             delta_map: Default::default(),
             logic_circuit,
@@ -856,6 +860,7 @@ impl TransactionBuilder {
     }
 
     fn build_shielded_input<B: Backend>(
+        &mut self,
         api: &mut BarretenbergApi<B>,
         tree: &mut CommitmentTree<Node>,
         spending_key: ExtendedSpendingKey,
@@ -916,10 +921,18 @@ impl TransactionBuilder {
             resource_logic_ref: note.logic_ref,
             commitment_tree_root,
         };
+
+        self.consumed_data[usize::from(self.consumed_count)] = compliance_witness;
+        self.consumed_nullifiers[usize::from(self.consumed_count)] = logic_instance.tag;
+        self.consumed_publics[usize::from(self.consumed_count)] = compliance_public;
+        self.consumed_logics[usize::from(self.consumed_count)] = logic_instance;
+        self.consumed_witnesses[usize::from(self.consumed_count)] = logic_witness;
+        self.consumed_count += 1;
         (logic_witness, compliance_witness, logic_instance, compliance_public)
     }
 
     fn build_transparent_input(
+        &mut self,
         rng: &mut impl Rng,
         logic_ref: [u8; DIGEST_BYTES],
         addr: Address,
@@ -1022,6 +1035,13 @@ impl TransactionBuilder {
             resource_logic_ref: logic_ref,
             commitment_tree_root: INITIAL_ROOT,
         };
+
+        self.consumed_data[usize::from(self.consumed_count)] = compliance_witness;
+        self.consumed_nullifiers[usize::from(self.consumed_count)] = logic_instance.tag;
+        self.consumed_publics[usize::from(self.consumed_count)] = compliance_public;
+        self.consumed_logics[usize::from(self.consumed_count)] = logic_instance;
+        self.consumed_witnesses[usize::from(self.consumed_count)] = logic_witness;
+        self.consumed_count += 1;
         (logic_witness, compliance_witness, logic_instance, compliance_public)
     }
 
@@ -1053,6 +1073,7 @@ impl TransactionBuilder {
     }
 
     fn build_shielded_output<B: Backend>(
+        &mut self,
         api: &mut BarretenbergApi<B>,
         rng: &mut (impl Rng + rand::CryptoRng),
         logic_ref: [u8; DIGEST_BYTES],
@@ -1167,10 +1188,18 @@ impl TransactionBuilder {
             resource_commitment,
             resource_logic_ref: logic_ref,
         };
+
+        // Compliance witness
+        self.created_resources[usize::from(self.created_count)] = witness.resource;
+        self.created_publics[usize::from(self.created_count)] = compliance_public;
+        self.created_logics[usize::from(self.created_count)] = logic_instance;
+        self.created_witnesses[usize::from(self.created_count)] = witness;
+        self.created_count += 1;
         (witness, logic_instance, compliance_public)
     }
 
     fn build_transparent_output(
+        &mut self,
         rng: &mut impl Rng,
         logic_ref: [u8; DIGEST_BYTES],
         addr: &Address,
@@ -1251,52 +1280,14 @@ impl TransactionBuilder {
             resource_commitment,
             resource_logic_ref: logic_ref,
         };
-        (witness, logic_instance, compliance_public)
-    }
-    
-    fn add_input<B: Backend>(
-        &mut self,
-        api: &mut BarretenbergApi<B>,
-        logic_witness: TransferAuthWitness,
-        compliance_witness: ConsumedResourceWitness,
-        logic_instance: ResourceLogicInstance,
-        compliance_public: ConsumedResourcePublic,
-    ) {
-        self.consumed_data[usize::from(self.consumed_count)] = compliance_witness;
-        self.consumed_nullifiers[usize::from(self.consumed_count)] = logic_instance.tag;
-        self.consumed_publics[usize::from(self.consumed_count)] = compliance_public;
-        self.consumed_logics[usize::from(self.consumed_count)] = logic_instance;
-        let mut input_map = InputMap::new();
-        input_map.insert("witness".to_string(), logic_witness.into());
-        // Compute the proof from the witness bytes
-        let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
-        self.consumed_logic_proofs[usize::from(self.consumed_count)] = prove_response.proof;
-        assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
-        // Accumulate delta
-        *self.delta_map.entry(compliance_witness.resource.kind(api)).or_default() += SignMagnitude::from(compliance_witness.resource.quantity);
-        self.consumed_count += 1;
-    }
 
-    fn add_output<B: Backend>(
-        &mut self,
-        api: &mut BarretenbergApi<B>,
-        witness: TransferAuthWitness,
-        logic_instance: ResourceLogicInstance,
-        compliance_public: CreatedResourcePublic,
-    ) {
-        // Accumulate delta
-        *self.delta_map.entry(witness.resource.kind(api)).or_default() -= SignMagnitude::from(witness.resource.quantity);
         // Compliance witness
         self.created_resources[usize::from(self.created_count)] = witness.resource;
         self.created_publics[usize::from(self.created_count)] = compliance_public;
         self.created_logics[usize::from(self.created_count)] = logic_instance;
-        let mut input_map = InputMap::new();
-        input_map.insert("witness".to_string(), witness.into());
-        // Compute the proof from the witness bytes
-        let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
-        self.created_logic_proofs[usize::from(self.created_count)] = prove_response.proof;
-        assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+        self.created_witnesses[usize::from(self.created_count)] = witness;
         self.created_count += 1;
+        (witness, logic_instance, compliance_public)
     }
 
     fn build_compliance_artifacts(&self, rng: &mut impl Rng) -> (ComplianceWitness, ComplianceInstance) {
@@ -1341,9 +1332,39 @@ impl TransactionBuilder {
     fn build<B: Backend>(
         &mut self,
         api: &mut BarretenbergApi<B>,
-        compliance_witness: ComplianceWitness,
-        compliance_instance: ComplianceInstance,
+        rng: &mut impl Rng,
     ) -> Transaction {
+        // Generate input logic proofs
+        for i in 0..usize::from(self.consumed_count) {
+            let logic_witness = self.consumed_witnesses[i];
+            let compliance_witness = self.consumed_data[i];
+            let logic_instance = self.consumed_logics[i];
+            let compliance_public = self.consumed_publics[i];
+            
+            let mut input_map = InputMap::new();
+            input_map.insert("witness".to_string(), logic_witness.into());
+            // Compute the proof from the witness bytes
+            let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
+            self.consumed_logic_proofs[i] = prove_response.proof;
+            assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+            // Accumulate delta
+            *self.delta_map.entry(compliance_witness.resource.kind(api)).or_default() += SignMagnitude::from(compliance_witness.resource.quantity);
+        }
+        // Generate output logic proofs
+        for i in 0..usize::from(self.created_count) {
+            let witness = self.created_witnesses[i];
+            let logic_instance = self.created_logics[i];
+            let compliance_public = self.created_publics[i];
+            // Accumulate delta
+            *self.delta_map.entry(witness.resource.kind(api)).or_default() -= SignMagnitude::from(witness.resource.quantity);
+            let mut input_map = InputMap::new();
+            input_map.insert("witness".to_string(), witness.into());
+            // Compute the proof from the witness bytes
+            let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
+            self.created_logic_proofs[i] = prove_response.proof;
+            assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+        }
+        let (compliance_witness, compliance_instance) = self.build_compliance_artifacts(rng);
         let mut input_map = InputMap::new();
         input_map.insert("witness".to_string(), compliance_witness.into());
         // Compute the proof from the witness bytes
@@ -1434,15 +1455,13 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                             continue;
                         }
                         value_acc += note.resource.quantity;
-                        let (logic_witness, compliance_witness, logic_instance, compliance_public) =
-                            TransactionBuilder::build_shielded_input(
-                                &mut api,
-                                &mut client_state.tree,
-                                spending_key.clone(),
-                                note.resource.clone(),
-                                *pos as usize,
-                            );
-                        builder.add_input(&mut api, logic_witness, compliance_witness, logic_instance, compliance_public);
+                        builder.build_shielded_input(
+                            &mut api,
+                            &mut client_state.tree,
+                            spending_key.clone(),
+                            note.resource.clone(),
+                            *pos as usize,
+                        );
                     }
                 }
                 // Send the change back to the sender if there's any
@@ -1451,20 +1470,19 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                let (logic_witness, compliance_witness, logic_instance, compliance_public) = TransactionBuilder::build_transparent_input(
+                builder.build_transparent_input(
                     &mut rng,
                     logic_ref,
                     addr,
                     erc20_token_addr,
                     amount.into(),
                 );
-                builder.add_input(&mut api, logic_witness, compliance_witness, logic_instance, compliance_public);
             }
             // Compute the digest of the consumed nullifiers
             let consumed_nullifiers_digest = Resource::hash_nullifiers(builder.consumed_nullifiers, builder.consumed_count.into());
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
-                let (witness, logic_instance, compliance_public) = TransactionBuilder::build_shielded_output(
+                builder.build_shielded_output(
                     &mut api,
                     &mut rng,
                     logic_ref,
@@ -1474,11 +1492,10 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     consumed_nullifiers_digest,
                     builder.created_count,
                 );
-                builder.add_output(&mut api, witness, logic_instance, compliance_public);
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                let (witness, logic_instance, compliance_public) = TransactionBuilder::build_shielded_output(
+                builder.build_shielded_output(
                     &mut api,
                     &mut rng,
                     logic_ref,
@@ -1488,10 +1505,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     consumed_nullifiers_digest,
                     builder.created_count,
                 );
-                builder.add_output(&mut api, witness, logic_instance, compliance_public);
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
-                let (witness, logic_instance, compliance_public) = TransactionBuilder::build_transparent_output(
+                builder.build_transparent_output(
                     &mut rng,
                     logic_ref,
                     &addr,
@@ -1500,11 +1516,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     consumed_nullifiers_digest,
                     builder.created_count,
                 );
-                builder.add_output(&mut api, witness, logic_instance, compliance_public);
             }
-            let (compliance_witness, compliance_instance) = builder.build_compliance_artifacts(&mut rng);
             // Finally build the transaction
-            let transaction = builder.build(&mut api, compliance_witness, compliance_instance);
+            let transaction = builder.build(&mut api, &mut rng);
             shielded_pool
                 .submit(&mut api, &mut builder.compliance_circuit, transaction)
                 .expect("Transaction validation failed");
