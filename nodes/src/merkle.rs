@@ -128,7 +128,7 @@ pub struct CommitmentTree<Node> {
 
 impl<Node: Clone> CommitmentTree<Node> {
     /// Construct a commitment tree with the given leaf nodes
-    pub fn new<B: Backend>(api: &mut BarretenbergApi<B>, leafs: &[Node]) -> Self where Node: Hashable<BarretenbergApi<B>> {
+    pub fn new<T>(api: &mut T, leafs: &[Node]) -> Self where Node: Hashable<T> {
         // This capacity is sufficient to hold a Merkle tree (where an empty node
         // is added onto some rows to ensure that they are of even size) with the
         // given number of leaves. This follows from the identity ceil(ceil(x/m)/n)=ceil(x/(mn))
@@ -140,7 +140,7 @@ impl<Node: Clone> CommitmentTree<Node> {
     /// Merge the n-1 full Merkle trees with the last possibly unfilled one. All
     /// full trees must have the same size which must be a power of 2 and the
     /// tree must be smaller than this size.
-    pub fn merge<B: Backend>(api: &mut BarretenbergApi<B>, subtrees: &[CommitmentTree<Node>]) -> Self where Node: Hashable<BarretenbergApi<B>> {
+    pub fn merge<T>(api: &mut T, subtrees: &[CommitmentTree<Node>]) -> Self where Node: Hashable<T> {
         if subtrees.is_empty() {
             return Self { nodes: Vec::new(), leaf_count: 0, cache: Vec::new() };
         } else if subtrees.len() == 1 {
@@ -194,14 +194,14 @@ impl<Node: Clone> CommitmentTree<Node> {
         Self::complete(api, tree, prev_start, prev_width, height, leafs)
     }
     /// Complete the construction of given Merkle tree given the highest row data
-    fn complete<B: Backend>(
-        api: &mut BarretenbergApi<B>,
+    fn complete<T>(
+        api: &mut T,
         mut tree: Vec<Node>,
         mut prev_start: usize,
         mut prev_width: usize,
         heightp: usize,
         leafs: usize,
-    ) -> Self where Node: Hashable<BarretenbergApi<B>> {
+    ) -> Self where Node: Hashable<T> {
         // A cache for empty roots
         let mut cache = Vec::new();
         // Add higher and higher rows of the Merkle tree
@@ -228,14 +228,14 @@ impl<Node: Clone> CommitmentTree<Node> {
         Self { nodes: tree, leaf_count: leafs, cache }
     }
     /// Get the root node of the commitment tree
-    pub fn root<B: Backend>(&mut self, api: &mut BarretenbergApi<B>) -> Node where Node: Hashable<BarretenbergApi<B>> {
+    pub fn root<T>(&mut self, api: &mut T) -> Node where Node: Hashable<T> {
         self.nodes
             .last()
             .cloned()
             .unwrap_or_else(|| Node::empty_root(api, &mut self.cache, SAPLING_COMMITMENT_TREE_DEPTH))
     }
     /// Construct a merkle path to the given position in commitment tree
-    pub fn path<B: Backend>(&mut self, api: &mut BarretenbergApi<B>, mut pos: usize) -> MerklePath<Node> where Node: Hashable<BarretenbergApi<B>> {
+    pub fn path<T>(&mut self, api: &mut T, mut pos: usize) -> MerklePath<Node> where Node: Hashable<T> {
         let mut path = MerklePath {
             auth_path: vec![],
             position: pos as u64,
