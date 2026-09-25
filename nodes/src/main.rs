@@ -1081,7 +1081,6 @@ impl TransactionBuilder {
         erc20_token_addr: Address,
         amount: u128,
         consumed_nullifiers_digest: [u8; DIGEST_BYTES],
-        created_count: u8,
     ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
         // Compute the label reference
         let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
@@ -1099,7 +1098,7 @@ impl TransactionBuilder {
         value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk.to_bytes());
         let value_ref = keccak256(value_ref_bytes);
         // Derive the nonce
-        let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
+        let nonce = Resource::derive_nonce(u32::from(self.created_count), consumed_nullifiers_digest);
         // The permanent resource
         let resource = Resource {
             value_ref: value_ref.0,
@@ -1206,7 +1205,6 @@ impl TransactionBuilder {
         erc20_token_addr: Address,
         amount: u128,
         consumed_nullifiers_digest: [u8; DIGEST_BYTES],
-        created_count: u8,
     ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
         // Compute the label reference
         let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
@@ -1219,7 +1217,7 @@ impl TransactionBuilder {
         let mut value_ref = [0u8; 32];
         value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
         // Derive the nonce
-        let nonce = Resource::derive_nonce(u32::from(created_count), consumed_nullifiers_digest);
+        let nonce = Resource::derive_nonce(u32::from(self.created_count), consumed_nullifiers_digest);
         // The permanent resource
         let resource = Resource {
             value_ref,
@@ -1490,7 +1488,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     erc20_token_addr,
                     amount,
                     consumed_nullifiers_digest,
-                    builder.created_count,
                 );
             }
             // Add transaction outputs
@@ -1503,7 +1500,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     erc20_token_addr,
                     amount.into(),
                     consumed_nullifiers_digest,
-                    builder.created_count,
                 );
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
@@ -1514,7 +1510,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     erc20_token_addr,
                     amount.into(),
                     consumed_nullifiers_digest,
-                    builder.created_count,
                 );
             }
             // Finally build the transaction

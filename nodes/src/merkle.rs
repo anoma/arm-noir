@@ -15,13 +15,16 @@ use acir::AcirField;
 const SAPLING_COMMITMENT_TREE_DEPTH: usize = crate::MAX_TREE_DEPTH;
 
 /// A constant padding leaf used in Merkle trees.
-/// This is the hash of an empty string.
+/// This was computed from sha256("EMPTY")
 const PADDING_LEAF: [u8; DIGEST_BYTES] = [
     0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a,
     0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
     0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56,
     0x63, 0x3e, 0xf8, 0xc6, 0x0f, 0xab, 0x7b, 0x06
 ];
+/// The above constant as a node. Note that nodes
+/// internally represent numbers in big-endian byte
+/// order.
 const PADDING_LEAF_NODE: Node = Node { repr: [
     0x06, 0x7b, 0xab, 0x0f, 0xc6, 0xf8, 0x3e, 0x63,
     0x56, 0xc0, 0x4f, 0x06, 0x5e, 0xaa, 0xe7, 0x40,
@@ -114,7 +117,14 @@ impl<B: Backend> Hashable<BarretenbergApi<B>> for Node {
 
 /// An immutable commitment tree
 #[derive(Clone, Debug, Default)]
-pub struct CommitmentTree<Node>(Vec<Node>, usize, Vec<Node>);
+pub struct CommitmentTree<Node> {
+    // All nodes of the tree, level-by-level
+    nodes: Vec<Node>,
+    // Number of leafs in the Merkle tree
+    leaf_count: usize,
+    // Cache of empty hashes at each depth
+    cache: Vec<Node>,
+}
 
 impl<Node: Clone> CommitmentTree<Node> {
     /// Construct a commitment tree with the given leaf nodes
@@ -132,7 +142,7 @@ impl<Node: Clone> CommitmentTree<Node> {
     /// tree must be smaller than this size.
     pub fn merge<B: Backend>(api: &mut BarretenbergApi<B>, subtrees: &[CommitmentTree<Node>]) -> Self where Node: Hashable<BarretenbergApi<B>> {
         if subtrees.is_empty() {
-            return Self(Vec::new(), 0, Vec::new());
+            return Self { nodes: Vec::new(), leaf_count: 0, cache: Vec::new() };
         } else if subtrees.len() == 1 {
             return subtrees[0].clone();
         }
@@ -160,11 +170,11 @@ impl<Node: Clone> CommitmentTree<Node> {
             // Combine all the rows at the current level
             for subtree in &subtrees[0..(subtrees.len() - 1)] {
                 tree.extend_from_slice(
-                    &subtree.0[prev_first_start..(prev_first_start + prev_first_width)],
+                    &subtree.nodes[prev_first_start..(prev_first_start + prev_first_width)],
                 );
             }
             tree.extend_from_slice(
-                &subtrees.last().unwrap().0[prev_last_start..(prev_last_start + prev_last_width)],
+                &subtrees.last().unwrap().nodes[prev_last_start..(prev_last_start + prev_last_width)],
             );
             // Quit when we are the top of the full trees
             if prev_first_width == 1 {
@@ -215,14 +225,14 @@ impl<Node: Clone> CommitmentTree<Node> {
             prev_start += prev_width;
             prev_width /= 2;
         }
-        Self(tree, leafs, cache)
+        Self { nodes: tree, leaf_count: leafs, cache }
     }
     /// Get the root node of the commitment tree
     pub fn root<B: Backend>(&mut self, api: &mut BarretenbergApi<B>) -> Node where Node: Hashable<BarretenbergApi<B>> {
-        self.0
+        self.nodes
             .last()
             .cloned()
-            .unwrap_or_else(|| Node::empty_root(api, &mut self.2, SAPLING_COMMITMENT_TREE_DEPTH))
+            .unwrap_or_else(|| Node::empty_root(api, &mut self.cache, SAPLING_COMMITMENT_TREE_DEPTH))
     }
     /// Construct a merkle path to the given position in commitment tree
     pub fn path<B: Backend>(&mut self, api: &mut BarretenbergApi<B>, mut pos: usize) -> MerklePath<Node> where Node: Hashable<BarretenbergApi<B>> {
@@ -231,7 +241,7 @@ impl<Node: Clone> CommitmentTree<Node> {
             position: pos as u64,
         };
         let mut start = 0;
-        let mut width = self.1;
+        let mut width = self.leaf_count;
 
         for height in 0..SAPLING_COMMITMENT_TREE_DEPTH {
             if width % 2 == 1 {
@@ -241,18 +251,18 @@ impl<Node: Clone> CommitmentTree<Node> {
                 // The current node is a left child
                 let node = if pos + 1 < width {
                     // Node is within current row
-                    self.0[start + pos + 1]
+                    self.nodes[start + pos + 1]
                 } else {
                     // Node is to the right of current row
-                    Node::empty_root(api, &mut self.2, height)
+                    Node::empty_root(api, &mut self.cache, height)
                 };
                 path.auth_path.push((node, false));
             } else {
                 // The current node is a right child
                 let node = if pos - 1 < width {
-                    self.0[start + pos - 1]
+                    self.nodes[start + pos - 1]
                 } else {
-                    Node::empty_root(api, &mut self.2, height)
+                    Node::empty_root(api, &mut self.cache, height)
                 };
                 path.auth_path.push((node, true));
             }
@@ -265,19 +275,19 @@ impl<Node: Clone> CommitmentTree<Node> {
     }
     /// Returns the number of leaf nodes in the tree.
     pub fn size(&self) -> usize {
-        self.1
+        self.leaf_count
     }
 }
 
 impl<Node: BorshSerialize> BorshSerialize for CommitmentTree<Node> {
     fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        (&self.0, self.1).serialize(writer)
+        (&self.nodes, self.leaf_count).serialize(writer)
     }
 }
 
 impl<Node: BorshDeserialize> BorshDeserialize for CommitmentTree<Node> {
     fn deserialize_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
         let tup: (Vec<Node>, usize) = BorshDeserialize::deserialize_reader(reader)?;
-        Ok(Self(tup.0, tup.1, Default::default()))
+        Ok(Self { nodes: tup.0, leaf_count: tup.1, cache: Default::default() })
     }
 }
