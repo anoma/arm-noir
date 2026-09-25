@@ -91,7 +91,7 @@ use barretenberg_rs::BarretenbergError;
 use client::Commitment;
 use std::marker::PhantomData;
 use client::DISCOVERY_CIPHERTEXT_LEN;
-use merkle::Node;
+use merkle::CmtNode;
 use merkle::CommitmentTree;
 
 // ERC-20 forwarder address
@@ -411,11 +411,11 @@ struct ShieldedPool {
     // Nullifiers in the pool
     nullifiers: BTreeSet<Nullifier>,
     // Resource commitments in the pool
-    commitments: Vec<Node>,
+    commitments: Vec<CmtNode>,
     // Transactions in the pool
     transactions: Vec<Transaction>,
     // Historical anchors
-    anchors: BTreeSet<Node>,
+    anchors: BTreeSet<CmtNode>,
     // Registered logic circuits
     #[borsh(skip)]
     logic_circuits: BTreeMap<Vec<u8>, BarretenbergCircuit>,
@@ -425,7 +425,7 @@ impl ShieldedPool {
     fn new<B: Backend>(api: &mut BarretenbergApi<B>) -> Self {
         // Include an anchor for the empty tree
         let mut anchors = BTreeSet::default();
-        anchors.insert(CommitmentTree::new(api, &[]).root(api));
+        anchors.insert(CommitmentTree::new(api, MAX_TREE_DEPTH, &[]).root(api));
         ShieldedPool {
             anchors,
             nullifiers: BTreeSet::default(),
@@ -469,7 +469,7 @@ impl ShieldedPool {
             let consumed_public = tx.compliance_instance.consumed_publics[i as usize];
             if nullifiers.contains_key(&consumed_public.resource_nullifier) {
                 return Err(ShieldedPoolError::DuplicateNullifier);
-            } else if !self.anchors.contains(&Node::new(consumed_public.commitment_tree_root)) {
+            } else if !self.anchors.contains(&CmtNode::new(consumed_public.commitment_tree_root)) {
                 return Err(ShieldedPoolError::NonExistentAnchor);
             } else {
                 nullifiers.insert(consumed_public.resource_nullifier, consumed_public.resource_logic_ref);
@@ -533,11 +533,11 @@ impl ShieldedPool {
                 }
             } else {
                 // Update the Merkle tree
-                self.commitments.push(Node::new(logic_instance.tag));
+                self.commitments.push(CmtNode::new(logic_instance.tag));
             }
         }
         // Compute the new Merkle root
-        self.anchors.insert(CommitmentTree::new(api, &self.commitments).root(api));
+        self.anchors.insert(CommitmentTree::new(api, MAX_TREE_DEPTH, &self.commitments).root(api));
         // Record the transaction
         self.transactions.push(tx);
         Ok(())
@@ -555,7 +555,7 @@ fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
 #[derive(Default, BorshSerialize, BorshDeserialize, Debug)]
 struct ClientState {
     // The state of the current commitment tree
-    tree: CommitmentTree<Node>,
+    tree: CommitmentTree<CmtNode>,
     // Map viewing keys to the notes they own
     pos_map: HashMap<ExtendedFullViewingKey, BTreeSet<u64>>,
     // Map nullifiers to note positions they nullify
@@ -652,13 +652,13 @@ impl ClientState {
                     }
                 }
                 // Record the encountered resource commitment
-                commitments.push(Node::new(logic_instance.tag));
+                commitments.push(CmtNode::new(logic_instance.tag));
                 // Update the note counter
                 state.current_pos += 1;
             }
         }
         // Finally construct the tree
-        state.tree = CommitmentTree::new(api, &commitments);
+        state.tree = CommitmentTree::new(api, MAX_TREE_DEPTH, &commitments);
         // Pre-compute the resource nullifiers
         for (current_pos, resource) in &state.note_map {
             for fvk in fvks {
@@ -862,7 +862,7 @@ impl TransactionBuilder {
     fn build_shielded_input<B: Backend>(
         &mut self,
         api: &mut BarretenbergApi<B>,
-        tree: &mut CommitmentTree<Node>,
+        tree: &mut CommitmentTree<CmtNode>,
         spending_key: ExtendedSpendingKey,
         note: Resource,
         position: usize,
