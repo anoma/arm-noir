@@ -867,6 +867,9 @@ impl TransactionBuilder {
         note: Resource,
         position: usize,
     ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
+        if self.created_count > 0 {
+            panic!("Transaction inputs cannot be added after transparent outputs");
+        }
         // The value info
         let payment_addr = spending_key.to_viewing_key().to_payment_address();
         let value_info = ValueInfo {
@@ -939,6 +942,9 @@ impl TransactionBuilder {
         erc20_token_addr: Address,
         amount: u128,
     ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
+        if self.created_count > 0 {
+            panic!("Transaction inputs cannot be added after transparent outputs");
+        }
         // Compute the label reference
         let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
@@ -1080,8 +1086,9 @@ impl TransactionBuilder {
         payment_addr: &PaymentAddress,
         erc20_token_addr: Address,
         amount: u128,
-        consumed_nullifiers_digest: [u8; DIGEST_BYTES],
     ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
+        // Compute the digest of the consumed nullifiers
+        let consumed_nullifiers_digest = Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
         // Compute the label reference
         let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
@@ -1204,8 +1211,9 @@ impl TransactionBuilder {
         addr: &Address,
         erc20_token_addr: Address,
         amount: u128,
-        consumed_nullifiers_digest: [u8; DIGEST_BYTES],
     ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
+        // Compute the digest of the consumed nullifiers
+        let consumed_nullifiers_digest = Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
         // Compute the label reference
         let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
@@ -1476,8 +1484,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     amount.into(),
                 );
             }
-            // Compute the digest of the consumed nullifiers
-            let consumed_nullifiers_digest = Resource::hash_nullifiers(builder.consumed_nullifiers, builder.consumed_count.into());
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
                 builder.build_shielded_output(
@@ -1487,7 +1493,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     &payment_addr,
                     erc20_token_addr,
                     amount,
-                    consumed_nullifiers_digest,
                 );
             }
             // Add transaction outputs
@@ -1499,7 +1504,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     &payment_addr,
                     erc20_token_addr,
                     amount.into(),
-                    consumed_nullifiers_digest,
                 );
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
@@ -1509,7 +1513,6 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     &addr,
                     erc20_token_addr,
                     amount.into(),
-                    consumed_nullifiers_digest,
                 );
             }
             // Finally build the transaction
