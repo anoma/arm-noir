@@ -33,7 +33,6 @@ use barretenberg_rs::BarretenbergApi;
 use nodes::BarretenbergCircuit;
 use alloy::primitives::address;
 use alloy::primitives::keccak256;
-use types::MAX_TREE_DEPTH;
 use types::EmbeddedCurveScalar;
 use types::EmbeddedCurvePoint;
 use client::ClientState;

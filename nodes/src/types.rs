@@ -1132,7 +1132,7 @@ mod tests {
                     0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08,
                     0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8,
                 ],
-                encryption_pk: [0; MAX_TAGGED_ENCRYPTION_PK_LEN],
+                encryption_pk: EmbeddedCurvePoint::point_at_infinity(),
             }),
             auth_sig: Some([
                 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
@@ -1140,29 +1140,15 @@ mod tests {
                 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
                 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
             ]),
-            resource_ciphertext: Some([0; MAX_RESOURCE_CIPHERTEXT_LEN]),
-            resource_ciphertext_len: 0,
-            discovery_ciphertext: Some([0; MAX_DISCOVERY_CIPHERTEXT_LEN]),
-            discovery_ciphertext_len: 0,
-            forwarder_info: Some(ForwarderInfo {
-                call_type: 0,
-                ethereum_account_addr: [0; MAX_ETH_ADDR_LEN],
-                permit: Some(PermitInfo {
-                    permit_nonce: [0; MAX_PERMIT_NONCE_LEN],
-                    permit_deadline: [0; MAX_PERMIT_DEADLINE_LEN],
-                    permit_sig: [0; MAX_PERMIT_SIG_LEN],
-                }),
-            }),
-            label_info: Some(LabelInfo {
-                forwarder_addr: [0; MAX_FORWARDER_ADDR_LEN],
-                erc20_token_addr: [0; MAX_ERC20_TOKEN_ADDR_LEN],
-            }),
+            encryption_info: None,
+            forwarder_info: None,
+            label_info: None,
             resource: Resource {
                 logic_ref: [0; DIGEST_BYTES],
                 label_ref: [0; DIGEST_BYTES],
                 value_ref: [
-                    251, 115, 230, 34, 134, 135, 66, 60, 171, 246, 65, 210, 213, 104, 205, 204,
-                    207, 125, 253, 189, 44, 24, 199, 126, 89, 234, 46, 24, 182, 164, 120, 101,
+                    120, 48, 20, 171, 173, 225, 227, 235, 42, 220, 68, 51, 122, 237, 236, 0,
+                    205, 27, 59, 211, 7, 187, 103, 8, 125, 74, 218, 229, 16, 191, 110, 218,
                 ],
                 quantity: 0,
                 nonce: [0; DIGEST_BYTES],
