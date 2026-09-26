@@ -37,12 +37,12 @@ pub const DIGEST_BYTES: usize = 32;
 const MAX_FORWARDER_ADDR_LEN: usize = 20;
 const MAX_ERC20_TOKEN_ADDR_LEN: usize = 20;
 pub const MAX_ETH_ADDR_LEN: usize = 20;
-const MAX_AUTH_PK_LEN: usize = 65;
+pub const MAX_AUTH_PK_LEN: usize = 65;
 pub const DISCOVERY_PK_LEN: usize = 65;
 pub const DISCOVERY_SHARED_POINT_LEN: usize = 32;
 pub const DISCOVERY_CIPHERTEXT_LEN: usize = 16;
 pub const ENCRYPTION_CIPHERTEXT_LEN: usize = 256;
-const MAX_ENCRYPTION_PK_LEN: usize = 65;
+const MAX_TAGGED_ENCRYPTION_PK_LEN: usize = 65;
 const MAX_AUTH_SIG_LEN: usize = 64;
 const MAX_RESOURCE_CIPHERTEXT_LEN: usize = 340;
 const MAX_DISCOVERY_CIPHERTEXT_LEN: usize = 340;
@@ -50,7 +50,7 @@ const MAX_PERMIT_NONCE_LEN: usize = 32;
 const MAX_PERMIT_DEADLINE_LEN: usize = 32;
 const MAX_PERMIT_SIG_LEN: usize = 65;
 const MAX_INPUT_LEN: usize = 256;
-const MAX_OUTPUT_LEN: usize = 64;
+pub const MAX_OUTPUT_LEN: usize = 64;
 const MAX_FORWARDER_CALLDATA_LEN: usize = 340;
 const MAX_BLOBS_PER_PAYLOAD: usize = 1;
 const MAX_BLOB_LEN: usize = 340;
@@ -82,6 +82,9 @@ const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIG
 pub const ENCRYPTION_NONCE_LEN: usize = 12;
 pub const DISCOVERY_NONCE_LEN: usize = 12;
 const RESOURCE_WITH_LABEL_BYTES: usize = RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
+pub const FORWARDER_ADDR_LEN: usize = 20;
+pub const ERC20_TOKEN_ADDR_LEN: usize = 20;
+pub const MAX_UNTAGGED_ENCRYPTION_PK_LEN: usize = 64;
 pub const AES_KEY_LEN: usize = 16;
 
 /// Construct input value from Option type
@@ -160,7 +163,7 @@ impl Ciphertext<DISCOVERY_CIPHERTEXT_LEN, k256::AffinePoint> {
 impl Ciphertext<ENCRYPTION_CIPHERTEXT_LEN, EmbeddedCurvePoint> {
     /// Serializes the Ciphertext into a fixed-length byte array of size `N`.
     /// The layout is: Nonce (12 bytes) | PK (65 bytes) | Cipher Data | Zero Padding
-    pub fn to_bytes(&self) -> [u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_ENCRYPTION_PK_LEN] {
+    pub fn to_bytes(&self) -> [u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_TAGGED_ENCRYPTION_PK_LEN] {
         let mut bytes = [0u8; _];
         let mut offset: usize = 0;
         // 1. Write nonce (12 bytes)
@@ -1129,7 +1132,7 @@ mod tests {
                     0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08,
                     0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8,
                 ],
-                encryption_pk: [0; MAX_ENCRYPTION_PK_LEN],
+                encryption_pk: [0; MAX_TAGGED_ENCRYPTION_PK_LEN],
             }),
             auth_sig: Some([
                 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,

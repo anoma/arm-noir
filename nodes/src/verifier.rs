@@ -5,7 +5,7 @@ use crate::merkle::CmtNode;
 use crate::merkle::CommitmentTree;
 use crate::types::Nullifier;
 use borsh::{BorshSerialize, BorshDeserialize};
-use crate::Transaction;
+use crate::client::Transaction;
 use std::collections::BTreeMap;
 use barretenberg_rs::BarretenbergApi;
 use nodes::BarretenbergCircuit;

@@ -19,6 +19,10 @@ use noirc_artifacts::program::CompiledProgram;
 use std::io::Read;
 use std::path::PathBuf;
 use barretenberg_rs::Backend;
+use std::ops::{Add, Sub, AddAssign, SubAssign};
+use std::cmp::Ordering;
+use std::rc::Rc;
+use std::cell::LazyCell;
 
 /// The directory containing the common reference string
 const CRS_DIR: &str = ".bb-crs";
@@ -230,4 +234,122 @@ pub fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
     let mut dest = [0u8; M];
     dest[..src.len()].copy_from_slice(src);
     dest
+}
+
+// Represents a delayed computation
+pub type Promise<T> = Rc<LazyCell<T, Box<dyn Fn() -> T>>>;
+
+pub trait PromiseExt<T> {
+    // Delay the given computation
+    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static;
+
+    // A promise that returns the default value
+    fn default() -> Self where T: Default;
+}
+
+impl<T> PromiseExt<T> for Promise<T> {
+    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static {
+        Rc::new(LazyCell::new(Box::new(f)))
+    }
+
+    fn default() -> Self where T: Default {
+        Promise::delay(|| Default::default())
+    }
+}
+
+// Representation of a number as sign and magnitude
+#[derive(Clone, Copy, Debug)]
+pub struct SignMagnitude<T> {
+    // False is a plus sign, true is a negative sign
+    pub sign: bool,
+    // Magnitude of the number
+    pub magnitude: T,
+}
+
+impl<T> From<T> for SignMagnitude<T> {
+    fn from(magnitude: T) -> Self {
+        Self { sign: false, magnitude }
+    }
+}
+
+impl<T: Default> Default for SignMagnitude<T> {
+    fn default() -> Self {
+        Self { sign: false, magnitude: T::default() }
+    }
+}
+
+impl<U, T: Add<Output = U> + Sub<Output = U> + Ord> Add for SignMagnitude<T> {
+    type Output = SignMagnitude<U>;
+    
+    fn add(self, rhs: Self) -> Self::Output {
+        if self.sign == rhs.sign {
+            SignMagnitude::<U> { sign: self.sign, magnitude: self.magnitude + rhs.magnitude }
+        } else if self.magnitude >= rhs.magnitude {
+            SignMagnitude::<U> { sign: self.sign, magnitude: self.magnitude - rhs.magnitude }
+        } else {
+            SignMagnitude::<U> { sign: rhs.sign, magnitude: rhs.magnitude - self.magnitude }
+        }
+    }
+}
+
+impl<T: AddAssign + SubAssign + Ord> AddAssign for SignMagnitude<T> {
+    fn add_assign(&mut self, mut rhs: Self) {
+        if self.sign == rhs.sign {
+            self.magnitude += rhs.magnitude;
+        } else if self.magnitude >= rhs.magnitude {
+            self.magnitude -= rhs.magnitude;
+        } else {
+            std::mem::swap(self, &mut rhs);
+            self.magnitude -= rhs.magnitude;
+        }
+    }
+}
+
+impl<U, T: Add<Output = U> + Sub<Output = U> + Ord> Sub for SignMagnitude<T> {
+    type Output = SignMagnitude<U>;
+    
+    fn sub(self, mut rhs: Self) -> Self::Output {
+        rhs.sign = !rhs.sign;
+        self + rhs
+    }
+}
+
+impl<T: AddAssign + SubAssign + Ord> SubAssign for SignMagnitude<T> {
+    fn sub_assign(&mut self, mut rhs: Self) {
+        rhs.sign = !rhs.sign;
+        *self += rhs
+    }
+}
+
+impl<T: Default + Eq> PartialEq for SignMagnitude<T> {
+    fn eq(&self, other: &Self) -> bool {
+        let zero = T::default();
+        let is_identical = self.sign == other.sign && self.magnitude == other.magnitude;
+        let both_zero = self.magnitude == zero && other.magnitude == zero;
+        is_identical || both_zero
+    }
+}
+
+impl<T: Default + Eq> Eq for SignMagnitude<T> {}
+
+impl<T: Default + Eq + Ord> Ord for SignMagnitude<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if *self == *other {
+            Ordering::Equal
+        } else if self.sign == other.sign && !self.sign {
+            self.magnitude.cmp(&other.magnitude)
+        } else if self.sign == other.sign {
+            self.magnitude.cmp(&other.magnitude).reverse()
+        } else if !self.sign {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        }
+    }
+}
+
+impl<T: Default + Eq + Ord> PartialOrd for SignMagnitude<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
