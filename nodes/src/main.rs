@@ -93,6 +93,10 @@ use std::marker::PhantomData;
 use client::DISCOVERY_CIPHERTEXT_LEN;
 use merkle::CmtNode;
 use merkle::CommitmentTree;
+use std::cell::LazyCell;
+use std::cell::OnceCell;
+use std::cell::Cell;
+use std::rc::Rc;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -791,27 +795,50 @@ struct Transaction {
 
 // Data structure to facilitate building Transactions
 struct TransactionBuilder {
+    // The action root to be signed over
+    action_root: Rc<OnceCell<[u8; DIGEST_BYTES]>>,
     // The consumed nullifiers
     consumed_nullifiers: [[u8; DIGEST_BYTES]; MAX_CONSUMED],
     // The consumed data
     consumed_data: [ConsumedResourceWitness; MAX_CONSUMED],
     consumed_publics: [ConsumedResourcePublic; MAX_CONSUMED],
-    consumed_logics: [ResourceLogicInstance; MAX_CONSUMED],
+    consumed_logics: [Promise<ResourceLogicInstance>; MAX_CONSUMED],
     consumed_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
-    consumed_witnesses: [TransferAuthWitness; MAX_CONSUMED],
+    consumed_witnesses: [Promise<TransferAuthWitness>; MAX_CONSUMED],
     consumed_count: u8,
     // The created data
     created_resources: [Resource; MAX_CREATED],
     created_publics: [CreatedResourcePublic; MAX_CREATED],
-    created_logics: [ResourceLogicInstance; MAX_CREATED],
+    created_logics: [Promise<ResourceLogicInstance>; MAX_CREATED],
     created_logic_proofs: [Vec<Vec<u8>>; MAX_CONSUMED],
-    created_witnesses: [TransferAuthWitness; MAX_CONSUMED],
+    created_witnesses: [Promise<TransferAuthWitness>; MAX_CONSUMED],
     created_count: u8,
     // Quantity delta
     delta_map: BTreeMap<EmbeddedCurvePoint, SignMagnitude<u128>>,
     // Circuits required for building proofs
     logic_circuit: BarretenbergCircuit,
     compliance_circuit: BarretenbergCircuit,
+}
+
+// Represents a delayed computation
+type Promise<T> = Rc<LazyCell<T, Box<dyn Fn() -> T>>>;
+
+trait PromiseExt<T> {
+    // Delay the given computation
+    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static;
+
+    // A promise that returns the default value
+    fn default() -> Self where T: Default;
+}
+
+impl<T> PromiseExt<T> for Promise<T> {
+    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static {
+        Rc::new(LazyCell::new(Box::new(f)))
+    }
+
+    fn default() -> Self where T: Default {
+        Promise::delay(|| Default::default())
+    }
 }
 
 impl TransactionBuilder {
@@ -826,18 +853,19 @@ impl TransactionBuilder {
         let compliance_circuit = BarretenbergCircuit::new(api, compliance_program_artifact_path);
         // Use the default initialization on other fields
         Self {
+            action_root: Default::default(),
             consumed_nullifiers: Default::default(),
             consumed_data: Default::default(),
             consumed_publics: Default::default(),
-            consumed_logics: Default::default(),
+            consumed_logics: std::array::from_fn(|_| Promise::default()),
             consumed_logic_proofs: Default::default(),
-            consumed_witnesses: Default::default(),
+            consumed_witnesses: std::array::from_fn(|_| Promise::default()),
             consumed_count: 0,
             created_resources: Default::default(),
             created_publics: Default::default(),
-            created_logics: Default::default(),
+            created_logics: std::array::from_fn(|_| Promise::default()),
             created_logic_proofs: Default::default(),
-            created_witnesses: Default::default(),
+            created_witnesses: std::array::from_fn(|_| Promise::default()),
             created_count: 0,
             delta_map: Default::default(),
             logic_circuit,
@@ -866,7 +894,7 @@ impl TransactionBuilder {
         spending_key: ExtendedSpendingKey,
         note: Resource,
         position: usize,
-    ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
+    ) {
         if self.created_count > 0 {
             panic!("Transaction inputs cannot be added after transparent outputs");
         }
@@ -876,22 +904,25 @@ impl TransactionBuilder {
             auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
             encryption_pk: payment_addr.encryption_public_key,
         };
-        // The action root
-        let action_root = [0u8; DIGEST_BYTES];
-        // Sign over the resource
-        let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
         // The transfer authorization witness
-        let logic_witness = TransferAuthWitness {
-            resource: note.clone(),
-            is_consumed: true,
-            action_root,
-            nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
-            value_info: Some(value_info),
-            encryption_info: None,
-            label_info: None,
-            auth_sig: Some(auth_sig.to_bytes().into()),
-            forwarder_info: None,
-        };
+        let action_root_clone = self.action_root.clone();
+        let logic_witness = Promise::delay(move || {
+            // The action root
+            let action_root: [u8; DIGEST_BYTES] = *action_root_clone.get().expect("action root must be initialized first");
+            // Sign over the resource
+            let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
+            TransferAuthWitness {
+                resource: note.clone(),
+                is_consumed: true,
+                action_root,
+                nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
+                value_info: Some(value_info),
+                encryption_info: None,
+                label_info: None,
+                auth_sig: Some(auth_sig.to_bytes().into()),
+                forwarder_info: None,
+            }
+        });
         // Convert the Merkle path into the circuit's format
         let path = tree.path(api, position);
         let mut circuit_path = [(FieldElement::zero(), false); MAX_TREE_DEPTH];
@@ -901,23 +932,24 @@ impl TransactionBuilder {
         }
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
-            resource: logic_witness.resource,
+            resource: note.clone(),
             nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
             cm_merkle_path: MerklePath {
                 path: circuit_path,
                 depth: MAX_TREE_DEPTH,
             },
         };
-        let resource_commitment = compliance_witness.resource.commitment();
-        let resource_nullifier = compliance_witness.
-            resource
+        let resource_commitment = note.commitment();
+        let resource_nullifier = note
             .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-        let logic_instance = ResourceLogicInstance {
+        let logic_witness_clone = logic_witness.clone();
+        let action_root_clone = self.action_root.clone();
+        let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_nullifier,
-            action_root: action_root,
-            is_consumed: logic_witness.is_consumed,
+            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            is_consumed: logic_witness_clone.is_consumed,
             app_data: AppData::default(),
-        };
+        });
         let commitment_tree_root = compliance_witness.cm_merkle_path.root(api, resource_commitment);
         let compliance_public = ConsumedResourcePublic {
             resource_nullifier,
@@ -926,12 +958,11 @@ impl TransactionBuilder {
         };
 
         self.consumed_data[usize::from(self.consumed_count)] = compliance_witness;
-        self.consumed_nullifiers[usize::from(self.consumed_count)] = logic_instance.tag;
+        self.consumed_nullifiers[usize::from(self.consumed_count)] = resource_nullifier;
         self.consumed_publics[usize::from(self.consumed_count)] = compliance_public;
         self.consumed_logics[usize::from(self.consumed_count)] = logic_instance;
         self.consumed_witnesses[usize::from(self.consumed_count)] = logic_witness;
         self.consumed_count += 1;
-        (logic_witness, compliance_witness, logic_instance, compliance_public)
     }
 
     fn build_transparent_input(
@@ -941,7 +972,7 @@ impl TransactionBuilder {
         addr: Address,
         erc20_token_addr: Address,
         amount: u128,
-    ) -> (TransferAuthWitness, ConsumedResourceWitness, ResourceLogicInstance, ConsumedResourcePublic) {
+    ) {
         if self.created_count > 0 {
             panic!("Transaction inputs cannot be added after transparent outputs");
         }
@@ -980,20 +1011,19 @@ impl TransactionBuilder {
             ethereum_account_addr: addr.into_array(),
             permit: Some(permit_info),
         };
-        // The action root
-        let action_root = [0u8; DIGEST_BYTES];
         // The transfer authorization witness
-        let logic_witness = TransferAuthWitness {
+        let action_root_clone = self.action_root.clone();
+        let logic_witness = Promise::delay(move || TransferAuthWitness {
             resource,
             is_consumed: true,
-            action_root,
+            action_root: *action_root_clone.get().expect("action root must be initialized first"),
             nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
             encryption_info: None,
             label_info: Some(label_info),
             auth_sig: None,
             forwarder_info: Some(forwarder_info),
-        };
+        });
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
             resource,
@@ -1003,39 +1033,42 @@ impl TransactionBuilder {
                 depth: MAX_TREE_DEPTH,
             },
         };
-        // Encode forwarder calldata
-        let (enc_input, enc_len) = encode_wrap_forwarder_input(
-            label_info.erc20_token_addr,
-            resource.quantity,
-            permit_info.permit_nonce,
-            permit_info.permit_deadline,
-            forwarder_info.ethereum_account_addr,
-            action_root,
-            permit_info.permit_sig,
-        );
-        let (data, data_len) = encode_forwarder_calldata(
-            label_info.forwarder_addr,
-            enc_input,
-            [0; MAX_OUTPUT_LEN],
-        );
-        // Finally, construct the application data
-        let mut app_data = AppData::default();
-        app_data.external_payload[0] = ExpirableBlob {
-            blob: data,
-            blob_len: data_len.try_into().expect("data length too large"),
-            deletion_criterion: false,
-        };
-        app_data.external_payload_len = 1;
-        let resource_commitment = compliance_witness.resource.commitment();
-        let resource_nullifier = compliance_witness.
-            resource
+        let resource_commitment = resource.commitment();
+        let resource_nullifier = resource
             .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-        let logic_instance = ResourceLogicInstance {
-            tag: resource_nullifier,
-            action_root: action_root,
-            is_consumed: logic_witness.is_consumed,
-            app_data,
-        };
+        let logic_witness_clone = logic_witness.clone();
+        let action_root_clone = self.action_root.clone();
+        let logic_instance = Promise::delay(move || {
+            // Encode forwarder calldata
+            let (enc_input, enc_len) = encode_wrap_forwarder_input(
+                label_info.erc20_token_addr,
+                resource.quantity,
+                permit_info.permit_nonce,
+                permit_info.permit_deadline,
+                forwarder_info.ethereum_account_addr,
+                *action_root_clone.get().expect("action root must be initialized first"),
+                permit_info.permit_sig,
+            );
+            let (data, data_len) = encode_forwarder_calldata(
+                label_info.forwarder_addr,
+                enc_input,
+                [0; MAX_OUTPUT_LEN],
+            );
+            // Finally, construct the application data
+            let mut app_data = AppData::default();
+            app_data.external_payload[0] = ExpirableBlob {
+                blob: data,
+                blob_len: data_len.try_into().expect("data length too large"),
+                deletion_criterion: false,
+            };
+            app_data.external_payload_len = 1;
+            ResourceLogicInstance {
+                tag: resource_nullifier,
+                action_root: *action_root_clone.get().expect("action root must be initialized first"),
+                is_consumed: logic_witness_clone.is_consumed,
+                app_data,
+            }
+        });
         let compliance_public = ConsumedResourcePublic {
             resource_nullifier,
             resource_logic_ref: logic_ref,
@@ -1043,12 +1076,11 @@ impl TransactionBuilder {
         };
 
         self.consumed_data[usize::from(self.consumed_count)] = compliance_witness;
-        self.consumed_nullifiers[usize::from(self.consumed_count)] = logic_instance.tag;
+        self.consumed_nullifiers[usize::from(self.consumed_count)] = resource_nullifier;
         self.consumed_publics[usize::from(self.consumed_count)] = compliance_public;
         self.consumed_logics[usize::from(self.consumed_count)] = logic_instance;
         self.consumed_witnesses[usize::from(self.consumed_count)] = logic_witness;
         self.consumed_count += 1;
-        (logic_witness, compliance_witness, logic_instance, compliance_public)
     }
 
     // Encrypt the given plaintext with the given key preimage and
@@ -1086,7 +1118,7 @@ impl TransactionBuilder {
         payment_addr: &PaymentAddress,
         erc20_token_addr: Address,
         amount: u128,
-    ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
+    ) {
         // Compute the digest of the consumed nullifiers
         let consumed_nullifiers_digest = Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
         // Compute the label reference
@@ -1122,8 +1154,6 @@ impl TransactionBuilder {
             forwarder_addr: label_info.forwarder_addr,
             erc20_token_addr: label_info.erc20_token_addr,
         }).expect("Unable to serialize resource");
-        // The action root
-        let action_root = [0u8; DIGEST_BYTES];
         // Generate discovery ciphertext
         let discovery_sk = SecretKey::random(rng);
         let discovery_shared_point = diffie_hellman(discovery_sk.to_nonzero_scalar(), payment_addr.discovery_public_key.as_affine());
@@ -1155,17 +1185,18 @@ impl TransactionBuilder {
             sender_sk,
         };
         // The transfer authorization witness
-        let witness = TransferAuthWitness {
+        let action_root_clone = self.action_root.clone();
+        let witness = Promise::delay(move || TransferAuthWitness {
             resource,
             is_consumed: false,
-            action_root,
+            action_root: *action_root_clone.get().expect("action root must be initialized first"),
             nullifier_key: None,
             value_info: Some(value_info),
             encryption_info: Some(encryption_info),
             label_info: Some(label_info),
             auth_sig: None,
             forwarder_info: None,
-        };
+        });
         // Construct the application data
         let mut app_data = AppData::default();
         // Generate resource_payload
@@ -1182,26 +1213,27 @@ impl TransactionBuilder {
             deletion_criterion: true,
         };
         app_data.discovery_payload_len = 1;
-        let resource_commitment = witness.resource.commitment();
+        let resource_commitment = resource.commitment();
         // Finally construct the resource logic instance
-        let logic_instance = ResourceLogicInstance {
+        let witness_clone = witness.clone();
+        let action_root_clone = self.action_root.clone();
+        let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_commitment,
-            action_root: action_root,
-            is_consumed: witness.is_consumed,
+            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            is_consumed: witness_clone.is_consumed,
             app_data,
-        };
+        });
         let compliance_public = CreatedResourcePublic {
             resource_commitment,
             resource_logic_ref: logic_ref,
         };
 
         // Compliance witness
-        self.created_resources[usize::from(self.created_count)] = witness.resource;
+        self.created_resources[usize::from(self.created_count)] = resource;
         self.created_publics[usize::from(self.created_count)] = compliance_public;
         self.created_logics[usize::from(self.created_count)] = logic_instance;
         self.created_witnesses[usize::from(self.created_count)] = witness;
         self.created_count += 1;
-        (witness, logic_instance, compliance_public)
     }
 
     fn build_transparent_output(
@@ -1211,7 +1243,7 @@ impl TransactionBuilder {
         addr: &Address,
         erc20_token_addr: Address,
         amount: u128,
-    ) -> (TransferAuthWitness, ResourceLogicInstance, CreatedResourcePublic) {
+    ) {
         // Compute the digest of the consumed nullifiers
         let consumed_nullifiers_digest = Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
         // Compute the label reference
@@ -1243,20 +1275,19 @@ impl TransactionBuilder {
             ethereum_account_addr: addr.into_array(),
             permit: None,
         };
-        // The action root
-        let action_root = [0u8; DIGEST_BYTES];
         // The transfer authorization witness
-        let witness = TransferAuthWitness {
+        let action_root_clone = self.action_root.clone();
+        let witness = Promise::delay(move || TransferAuthWitness {
             resource,
             is_consumed: false,
-            action_root,
+            action_root: *action_root_clone.get().expect("action root must be initialized first"),
             nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
             encryption_info: None,
             label_info: Some(label_info),
             auth_sig: None,
             forwarder_info: Some(forwarder_info),
-        };
+        });
         let (enc_input, enc_len) = encode_unwrap_forwarder_input(
             label_info.erc20_token_addr,
             forwarder_info.ethereum_account_addr,
@@ -1275,25 +1306,26 @@ impl TransactionBuilder {
             deletion_criterion: false,
         };
         app_data.external_payload_len = 1;
-        let resource_commitment = witness.resource.commitment();
-        let logic_instance = ResourceLogicInstance {
+        let resource_commitment = resource.commitment();
+        let witness_clone = witness.clone();
+        let action_root_clone = self.action_root.clone();
+        let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_commitment,
-            action_root: action_root,
-            is_consumed: witness.is_consumed,
+            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            is_consumed: witness_clone.is_consumed,
             app_data,
-        };
+        });
         let compliance_public = CreatedResourcePublic {
             resource_commitment,
             resource_logic_ref: logic_ref,
         };
 
         // Compliance witness
-        self.created_resources[usize::from(self.created_count)] = witness.resource;
+        self.created_resources[usize::from(self.created_count)] = resource;
         self.created_publics[usize::from(self.created_count)] = compliance_public;
         self.created_logics[usize::from(self.created_count)] = logic_instance;
         self.created_witnesses[usize::from(self.created_count)] = witness;
         self.created_count += 1;
-        (witness, logic_instance, compliance_public)
     }
 
     fn build_compliance_artifacts(&self, rng: &mut impl Rng) -> (ComplianceWitness, ComplianceInstance) {
@@ -1340,15 +1372,16 @@ impl TransactionBuilder {
         api: &mut BarretenbergApi<B>,
         rng: &mut impl Rng,
     ) -> Transaction {
+        self.action_root.set([0u8; DIGEST_BYTES]).expect("Unable to set action root");
         // Generate input logic proofs
         for i in 0..usize::from(self.consumed_count) {
-            let logic_witness = self.consumed_witnesses[i];
+            let logic_witness = &self.consumed_witnesses[i];
             let compliance_witness = self.consumed_data[i];
-            let logic_instance = self.consumed_logics[i];
+            let logic_instance = &self.consumed_logics[i];
             let compliance_public = self.consumed_publics[i];
             
             let mut input_map = InputMap::new();
-            input_map.insert("witness".to_string(), logic_witness.into());
+            input_map.insert("witness".to_string(), (***logic_witness).into());
             // Compute the proof from the witness bytes
             let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
             self.consumed_logic_proofs[i] = prove_response.proof;
@@ -1358,13 +1391,13 @@ impl TransactionBuilder {
         }
         // Generate output logic proofs
         for i in 0..usize::from(self.created_count) {
-            let witness = self.created_witnesses[i];
-            let logic_instance = self.created_logics[i];
+            let witness = &self.created_witnesses[i];
+            let logic_instance = &self.created_logics[i];
             let compliance_public = self.created_publics[i];
             // Accumulate delta
             *self.delta_map.entry(witness.resource.kind(api)).or_default() -= SignMagnitude::from(witness.resource.quantity);
             let mut input_map = InputMap::new();
-            input_map.insert("witness".to_string(), witness.into());
+            input_map.insert("witness".to_string(), (***witness).into());
             // Compute the proof from the witness bytes
             let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
             self.created_logic_proofs[i] = prove_response.proof;
@@ -1378,10 +1411,10 @@ impl TransactionBuilder {
         assert_eq!(prove_response.public_inputs[0].clone(), compliance_instance.digest().to_be_bytes());
         let mut logic_instances = vec![];
         for idx in 0..usize::from(self.consumed_count) {
-            logic_instances.push((self.consumed_logics[idx], self.consumed_logic_proofs[idx].clone()));
+            logic_instances.push((**self.consumed_logics[idx], self.consumed_logic_proofs[idx].clone()));
         }
         for idx in 0..usize::from(self.created_count) {
-            logic_instances.push((self.created_logics[idx], self.created_logic_proofs[idx].clone()));
+            logic_instances.push((**self.created_logics[idx], self.created_logic_proofs[idx].clone()));
         }
         Transaction {
             logic_instances,
