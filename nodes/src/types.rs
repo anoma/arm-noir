@@ -82,6 +82,7 @@ const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIG
 pub const ENCRYPTION_NONCE_LEN: usize = 12;
 pub const DISCOVERY_NONCE_LEN: usize = 12;
 const RESOURCE_WITH_LABEL_BYTES: usize = RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
+pub const AES_KEY_LEN: usize = 16;
 
 /// Construct input value from Option type
 fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T>, T: Default {

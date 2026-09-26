@@ -3,6 +3,7 @@ pub mod types;
 pub mod wallet;
 pub mod merkle;
 pub mod verifier;
+pub mod client;
 
 use nodes::init_srs;
 use clap::{Parser, Args, Subcommand};
@@ -56,9 +57,6 @@ use types::MAX_CREATED;
 use types::ComplianceWitness;
 use types::EmbeddedCurveScalar;
 use types::COMPLIANCE_CIRCUIT_PATH;
-use std::collections::BTreeSet;
-use types::Nullifier;
-use borsh::{BorshSerialize, BorshDeserialize};
 use std::collections::BTreeMap;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::Signature;
@@ -79,7 +77,6 @@ use std::ops::{Add, Sub, AddAssign, SubAssign};
 use std::cmp::Ordering;
 use types::EncryptionInfo;
 use wallet::GRUMPKIN_PUBLIC_KEY_LEN;
-use types::ENCRYPTION_NONCE_LEN;
 use types::ResourceWithLabel;
 use types::DISCOVERY_NONCE_LEN;
 use k256::SecretKey;
@@ -87,20 +84,17 @@ use k256::ecdh::diffie_hellman;
 use types::DISCOVERY_PK_LEN;
 use types::DISCOVERY_SHARED_POINT_LEN;
 use types::Ciphertext;
-use barretenberg_rs::generated_types::CircuitProveResponse;
-use barretenberg_rs::BarretenbergError;
-use types::Commitment;
-use std::marker::PhantomData;
-use types::DISCOVERY_CIPHERTEXT_LEN;
 use merkle::CmtNode;
 use merkle::CommitmentTree;
 use std::cell::LazyCell;
 use std::cell::OnceCell;
-use std::cell::Cell;
 use std::rc::Rc;
 use merkle::ActNode;
-use barretenberg_rs::GrumpkinPoint;
 use verifier::ShieldedPool;
+use client::ClientState;
+use borsh::{BorshSerialize, BorshDeserialize};
+use types::AES_KEY_LEN;
+use nodes::pad_slice;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -109,7 +103,6 @@ const ERC20_TOKEN_ADDR_LEN: usize = 20;
 const MAX_AUTH_PK_LEN: usize = 65;
 const MAX_ENCRYPTION_PK_LEN: usize = 64;
 const MAX_OUTPUT_LEN: usize = 64;
-const AES_KEY_LEN: usize = 16;
 pub static INITIAL_ROOT: [u8; 32] =
         hex!("c9d5969b3cbdef3fe2f655d5b7644da065f6adab6e612236932bfc4412f46308");
 
@@ -400,140 +393,24 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-// Pad the given slice to the given array length
-fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
-    let mut dest = [0u8; M];
-    dest[..src.len()].copy_from_slice(src);
-    dest
+// Represents a delayed computation
+type Promise<T> = Rc<LazyCell<T, Box<dyn Fn() -> T>>>;
+
+trait PromiseExt<T> {
+    // Delay the given computation
+    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static;
+
+    // A promise that returns the default value
+    fn default() -> Self where T: Default;
 }
 
-// The client's view of the shielded pool
-#[derive(Default, BorshSerialize, BorshDeserialize, Debug)]
-struct ClientState {
-    // The state of the current commitment tree
-    tree: CommitmentTree<CmtNode>,
-    // Map viewing keys to the notes they own
-    pos_map: HashMap<ExtendedFullViewingKey, BTreeSet<u64>>,
-    // Map nullifiers to note positions they nullify
-    nf_map: HashMap<Nullifier, u64>,
-    // Map note position to notes
-    note_map: BTreeMap<u64, ResourceWithLabel>,
-    // Set of spent note positions
-    spent_notes: BTreeSet<u64>,
-    // The pool's current position
-    current_pos: u64,
-}
+impl<T> PromiseExt<T> for Promise<T> {
+    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static {
+        Rc::new(LazyCell::new(Box::new(f)))
+    }
 
-impl ClientState {
-    fn synchronize<B: Backend>(api: &mut BarretenbergApi<B>, pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
-        let mut state = Self::default();
-        // Track the encountered resource commitments
-        let mut commitments = vec![];
-        // Scan the notes in the queue
-        for transaction in pool.transactions {
-            for (logic_instance, _) in transaction.logic_instances {
-                // Process only created resources
-                if logic_instance.is_consumed { continue; }
-                let app_data = logic_instance.app_data;
-                for i in 0..app_data.discovery_payload_len {
-                    // Attempt to deserialize resource ciphertext
-                    let resource_payload = app_data.resource_payload[i as usize];
-                    let Some(resource_ciphertext) = Ciphertext::<_, EmbeddedCurvePoint>::from_bytes(
-                        &resource_payload.blob[..resource_payload.blob_len as usize],
-                    ) else {
-                        continue;
-                    };
-                    // Attempt to deserialize discovery ciphertext
-                    let discovery_payload = app_data.discovery_payload[i as usize];
-                    let Some(discovery_ciphertext) = Ciphertext::<_, k256::AffinePoint>::from_bytes(
-                        &discovery_payload.blob[..discovery_payload.blob_len as usize],
-                    ) else {
-                        continue;
-                    };
-                    for fvk in fvks {
-                        // Attempt to decrypt discovery payload
-                        let discovery_shared_point = diffie_hellman(fvk.discovery_secret_key.to_nonzero_scalar(), discovery_ciphertext.pk);
-                        let discovery_public_key = fvk.discovery_secret_key.public_key().to_encoded_point(false);
-                        let mut discovery_concat = [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
-                        discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(&discovery_public_key.as_bytes());
-                        discovery_concat[DISCOVERY_PK_LEN..].copy_from_slice(&discovery_shared_point.raw_secret_bytes());
-                        let key = &keccak256(discovery_concat)[..AES_KEY_LEN];
-                        let nonce_padded = pad_slice::<16>(&discovery_ciphertext.nonce);
-                        let plaintext = api.aes_decrypt(
-                            &discovery_ciphertext.cipher,
-                            &nonce_padded,
-                            key,
-                            discovery_ciphertext.cipher.len() as u32,
-                        )
-                            .expect("unable to perform AES decryption")
-                            .plaintext;
-                        // Padding scheme does not allow empty plaintexts
-                        if plaintext.len() == 0 { continue }
-                        // Grab the filler byte
-                        let remainder = plaintext[plaintext.len() - 1];
-                        // Ensure that the filler byte from the acceptable range
-                        if remainder == 0 || remainder > 16 || usize::from(remainder) > plaintext.len() { continue }
-                        // Ensure that the filler byte is consistently applied
-                        if plaintext[plaintext.len() - usize::from(remainder)..].iter().any(|&b| b != remainder) {
-                            continue;
-                        }
-                        // Finally, remove the padding
-                        let plaintext = &plaintext[..plaintext.len() - usize::from(remainder)];
-
-                        // Malformed payload, so skip resource decryption
-                        if plaintext != [0x00] { continue }
-
-                        // Attempt to decrypt resource payload
-                        let resource_shared_point = resource_ciphertext.pk * fvk.encryption_secret_key;
-                        let encryption_pk = EmbeddedCurvePoint::generator() * fvk.encryption_secret_key;
-                        let mut encryption_concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
-                        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&encryption_pk.to_bytes());
-                        encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&resource_shared_point.to_bytes());
-                        let key = &keccak256(encryption_concat)[..AES_KEY_LEN];
-                        let nonce_padded = pad_slice::<16>(&resource_ciphertext.nonce);
-                        let plaintext = api.aes_decrypt(
-                            &resource_ciphertext.cipher,
-                            &nonce_padded,
-                            key,
-                            resource_ciphertext.cipher.len() as u32,
-                        )
-                            .expect("unable to perform AES decryption")
-                            .plaintext;
-                        let remainder = plaintext[plaintext.len() - 1];
-                        let plaintext = &plaintext[..plaintext.len() - usize::from(remainder)];
-
-                        // Deserialize and store the decrypted resource
-                        let Ok(resource) = ResourceWithLabel::try_from_slice(&plaintext) else { continue };
-                        state.note_map.insert(state.current_pos, resource);
-                    }
-                }
-                // Record the encountered resource commitment
-                commitments.push(CmtNode::new(logic_instance.tag));
-                // Update the note counter
-                state.current_pos += 1;
-            }
-        }
-        // Finally construct the tree
-        state.tree = CommitmentTree::new(api, MAX_TREE_DEPTH, &commitments);
-        // Pre-compute the resource nullifiers
-        for (current_pos, resource) in &state.note_map {
-            for fvk in fvks {
-                if resource.resource.nk_commitment == fvk.nullifier_key.commit().0 {
-                    let nullifier_key = types::NullifierKey { bytes: fvk.nullifier_key.0 };
-                    let nullifier = resource.resource.nullifier(nullifier_key);
-                    state.nf_map.insert(nullifier, *current_pos);
-                    state.pos_map.entry(fvk.clone()).or_default().insert(*current_pos);
-                    break;
-                }
-            }
-        }
-        // Scan the nullifiers in the queue
-        for nullifier in pool.nullifiers {
-            if let Some(pos) = state.nf_map.get(&nullifier) {
-                state.spent_notes.insert(*pos);
-            }
-        }
-        state
+    fn default() -> Self where T: Default {
+        Promise::delay(|| Default::default())
     }
 }
 
@@ -672,27 +549,6 @@ struct TransactionBuilder {
     // Circuits required for building proofs
     logic_circuit: BarretenbergCircuit,
     compliance_circuit: BarretenbergCircuit,
-}
-
-// Represents a delayed computation
-type Promise<T> = Rc<LazyCell<T, Box<dyn Fn() -> T>>>;
-
-trait PromiseExt<T> {
-    // Delay the given computation
-    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static;
-
-    // A promise that returns the default value
-    fn default() -> Self where T: Default;
-}
-
-impl<T> PromiseExt<T> for Promise<T> {
-    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static {
-        Rc::new(LazyCell::new(Box::new(f)))
-    }
-
-    fn default() -> Self where T: Default {
-        Promise::delay(|| Default::default())
-    }
 }
 
 impl TransactionBuilder {

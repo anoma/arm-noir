@@ -224,3 +224,10 @@ pub fn read_bytes<const N: usize>(src: &[u8], offset: &mut usize) -> [u8; N] {
     *offset = next_offset;
     dest
 }
+
+/// Pad the given slice to the given array length
+pub fn pad_slice<const M: usize>(src: &[u8]) -> [u8; M] {
+    let mut dest = [0u8; M];
+    dest[..src.len()].copy_from_slice(src);
+    dest
+}
