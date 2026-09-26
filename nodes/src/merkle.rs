@@ -124,7 +124,7 @@ impl<B: Backend> Hashable<BarretenbergApi<B>> for CmtNode {
 /// A node within an action tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default, Ord, PartialOrd)]
 #[repr(transparent)]
-pub struct ActNode([u8; DIGEST_BYTES]);
+pub struct ActNode(pub [u8; DIGEST_BYTES]);
 
 impl<B> Hashable<B> for ActNode {
     fn empty_leaf() -> Self {

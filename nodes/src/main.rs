@@ -97,6 +97,7 @@ use std::cell::LazyCell;
 use std::cell::OnceCell;
 use std::cell::Cell;
 use std::rc::Rc;
+use merkle::ActNode;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -1372,7 +1373,21 @@ impl TransactionBuilder {
         api: &mut BarretenbergApi<B>,
         rng: &mut impl Rng,
     ) -> Transaction {
-        self.action_root.set([0u8; DIGEST_BYTES]).expect("Unable to set action root");
+        // Compute the action tree root
+        let mut tags = vec![];
+        for i in 0..usize::from(self.consumed_count) {
+            tags.push(ActNode(self.consumed_publics[i].resource_nullifier));
+        }
+        for i in 0..usize::from(self.created_count) {
+            tags.push(ActNode(self.created_publics[i].resource_commitment));
+        }
+        let action_tree_depth = if tags.len() == 1 {
+            0
+        } else {
+            (tags.len() - 1).ilog2() as usize + 1
+        };
+        let action_root = CommitmentTree::new(&mut (), action_tree_depth, &tags).root(&mut ());
+        self.action_root.set(action_root.0).expect("Unable to set action root");
         // Generate input logic proofs
         for i in 0..usize::from(self.consumed_count) {
             let logic_witness = &self.consumed_witnesses[i];
