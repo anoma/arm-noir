@@ -597,7 +597,7 @@ impl TransactionBuilder {
         (label_info, label_ref.0)
     }
 
-    fn build_shielded_input<B: Backend>(
+    fn add_shielded_input<B: Backend>(
         &mut self,
         api: &mut BarretenbergApi<B>,
         tree: &mut CommitmentTree<CmtNode>,
@@ -675,7 +675,7 @@ impl TransactionBuilder {
         self.consumed_count += 1;
     }
 
-    fn build_transparent_input(
+    fn add_transparent_input(
         &mut self,
         rng: &mut impl Rng,
         logic_ref: [u8; DIGEST_BYTES],
@@ -820,7 +820,7 @@ impl TransactionBuilder {
         (ciphertext, nonce)
     }
 
-    fn build_shielded_output<B: Backend>(
+    fn add_shielded_output<B: Backend>(
         &mut self,
         api: &mut BarretenbergApi<B>,
         rng: &mut (impl Rng + rand::CryptoRng),
@@ -946,7 +946,7 @@ impl TransactionBuilder {
         self.created_count += 1;
     }
 
-    fn build_transparent_output(
+    fn add_transparent_output(
         &mut self,
         rng: &mut impl Rng,
         logic_ref: [u8; DIGEST_BYTES],
@@ -1232,7 +1232,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                             continue;
                         }
                         value_acc += note.resource.quantity;
-                        builder.build_shielded_input(
+                        builder.add_shielded_input(
                             &mut api,
                             &mut client_state.tree,
                             spending_key.clone(),
@@ -1247,7 +1247,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
-                builder.build_transparent_input(
+                builder.add_transparent_input(
                     &mut rng,
                     logic_ref,
                     addr,
@@ -1257,7 +1257,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             // Add change output
             if let Some((payment_addr, erc20_token_addr, amount)) = change {
-                builder.build_shielded_output(
+                builder.add_shielded_output(
                     &mut api,
                     &mut rng,
                     logic_ref,
@@ -1268,7 +1268,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             }
             // Add transaction outputs
             if let Ok(payment_addr) = store.evaluate_payment_address(&to) {
-                builder.build_shielded_output(
+                builder.add_shielded_output(
                     &mut api,
                     &mut rng,
                     logic_ref,
@@ -1278,7 +1278,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 );
             } else if let Ok(addr) = store.evaluate_address(&to) {
                 // The transfer authorization witness
-                builder.build_transparent_output(
+                builder.add_transparent_output(
                     &mut rng,
                     logic_ref,
                     &addr,
