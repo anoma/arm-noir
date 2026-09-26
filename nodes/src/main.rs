@@ -408,6 +408,7 @@ enum ShieldedPoolError {
     UnpairedCommitment,
     CircuitNotRegistered,
     NonExistentAnchor,
+    InvalidActionTreeRoot,
 }
 
 // State of the shielded pool
@@ -454,6 +455,28 @@ impl ShieldedPool {
         compliance_circuit: &mut BarretenbergCircuit,
         tx: Transaction,
     ) -> Result<(), ShieldedPoolError> {
+        // Compute the expected action tree root
+        let mut tags = vec![];
+        for i in 0..tx.compliance_instance.consumed_count {
+            tags.push(ActNode(tx.compliance_instance.consumed_publics[i as usize].resource_nullifier));
+        }
+        for i in 0..tx.compliance_instance.created_count {
+            tags.push(ActNode(tx.compliance_instance.created_publics[i as usize].resource_commitment));
+        }
+        let action_tree_depth = if tags.len() == 1 {
+            0
+        } else {
+            (tags.len() - 1).ilog2() as usize + 1
+        };
+        let action_root = CommitmentTree::new(&mut (), action_tree_depth, &tags).root(&mut ());
+        // Check the supplied action roots
+        for (logic_instance, _proof) in &tx.logic_instances {
+            if tags.contains(&ActNode(logic_instance.tag)) {
+                if logic_instance.action_root != action_root.0 {
+                    return Err(ShieldedPoolError::InvalidActionTreeRoot)
+                }
+            }
+        }
         // Check the compliance proof
         let compliance_prove_response = CircuitProveResponse {
             proof: tx.compliance_proof.clone(),
@@ -907,6 +930,7 @@ impl TransactionBuilder {
         };
         // The transfer authorization witness
         let action_root_clone = self.action_root.clone();
+        let is_consumed = true;
         let logic_witness = Promise::delay(move || {
             // The action root
             let action_root: [u8; DIGEST_BYTES] = *action_root_clone.get().expect("action root must be initialized first");
@@ -914,7 +938,7 @@ impl TransactionBuilder {
             let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
             TransferAuthWitness {
                 resource: note.clone(),
-                is_consumed: true,
+                is_consumed,
                 action_root,
                 nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
                 value_info: Some(value_info),
@@ -943,12 +967,11 @@ impl TransactionBuilder {
         let resource_commitment = note.commitment();
         let resource_nullifier = note
             .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-        let logic_witness_clone = logic_witness.clone();
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_nullifier,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            is_consumed: logic_witness_clone.is_consumed,
+            is_consumed,
             app_data: AppData::default(),
         });
         let commitment_tree_root = compliance_witness.cm_merkle_path.root(api, resource_commitment);
@@ -1014,9 +1037,10 @@ impl TransactionBuilder {
         };
         // The transfer authorization witness
         let action_root_clone = self.action_root.clone();
+        let is_consumed = true;
         let logic_witness = Promise::delay(move || TransferAuthWitness {
             resource,
-            is_consumed: true,
+            is_consumed,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
             nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
@@ -1037,7 +1061,6 @@ impl TransactionBuilder {
         let resource_commitment = resource.commitment();
         let resource_nullifier = resource
             .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
-        let logic_witness_clone = logic_witness.clone();
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || {
             // Encode forwarder calldata
@@ -1066,7 +1089,7 @@ impl TransactionBuilder {
             ResourceLogicInstance {
                 tag: resource_nullifier,
                 action_root: *action_root_clone.get().expect("action root must be initialized first"),
-                is_consumed: logic_witness_clone.is_consumed,
+                is_consumed,
                 app_data,
             }
         });
@@ -1187,9 +1210,10 @@ impl TransactionBuilder {
         };
         // The transfer authorization witness
         let action_root_clone = self.action_root.clone();
+        let is_consumed = false;
         let witness = Promise::delay(move || TransferAuthWitness {
             resource,
-            is_consumed: false,
+            is_consumed,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
             nullifier_key: None,
             value_info: Some(value_info),
@@ -1216,12 +1240,11 @@ impl TransactionBuilder {
         app_data.discovery_payload_len = 1;
         let resource_commitment = resource.commitment();
         // Finally construct the resource logic instance
-        let witness_clone = witness.clone();
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_commitment,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            is_consumed: witness_clone.is_consumed,
+            is_consumed,
             app_data,
         });
         let compliance_public = CreatedResourcePublic {
@@ -1276,11 +1299,12 @@ impl TransactionBuilder {
             ethereum_account_addr: addr.into_array(),
             permit: None,
         };
+        let is_consumed = false;
         // The transfer authorization witness
         let action_root_clone = self.action_root.clone();
         let witness = Promise::delay(move || TransferAuthWitness {
             resource,
-            is_consumed: false,
+            is_consumed,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
             nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
@@ -1308,12 +1332,11 @@ impl TransactionBuilder {
         };
         app_data.external_payload_len = 1;
         let resource_commitment = resource.commitment();
-        let witness_clone = witness.clone();
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_commitment,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            is_consumed: witness_clone.is_consumed,
+            is_consumed,
             app_data,
         });
         let compliance_public = CreatedResourcePublic {
