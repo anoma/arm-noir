@@ -98,6 +98,7 @@ use std::cell::OnceCell;
 use std::cell::Cell;
 use std::rc::Rc;
 use merkle::ActNode;
+use barretenberg_rs::GrumpkinPoint;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -409,6 +410,7 @@ enum ShieldedPoolError {
     CircuitNotRegistered,
     NonExistentAnchor,
     InvalidActionTreeRoot,
+    InvalidSignature,
 }
 
 // State of the shielded pool
@@ -453,8 +455,23 @@ impl ShieldedPool {
         &mut self,
         api: &mut BarretenbergApi<B>,
         compliance_circuit: &mut BarretenbergCircuit,
-        tx: Transaction,
+        mut tx: Transaction,
     ) -> Result<(), ShieldedPoolError> {
+        // Verify the transaction signature
+        let signature = tx.signature.take().expect("transaction must be signed");
+        let tx_bytes = borsh::to_vec(&tx).expect("unable to hash transaction");
+        let tx_hash = keccak256(tx_bytes);
+        let msg = FieldElement::from_le_bytes_reduce(&tx_hash.0);
+        let public_key = GrumpkinPoint {
+            x: tx.compliance_instance.delta.x.to_be_bytes(),
+            y: tx.compliance_instance.delta.y.to_be_bytes(),
+        };
+        let verified = api.schnorr_verify_signature(&msg.to_be_bytes(), public_key, &signature.0, &signature.1)
+            .expect("unable to verify transaction signature");
+        println!("Signature verification response: {:?}", verified);
+        if !verified.verified {
+            return Err(ShieldedPoolError::InvalidSignature);
+        }
         // Compute the expected action tree root
         let mut tags = vec![];
         for i in 0..tx.compliance_instance.consumed_count {
@@ -815,6 +832,8 @@ struct Transaction {
     compliance_instance: ComplianceInstance,
     // The compliance proof
     compliance_proof: Vec<Vec<u8>>,
+    // Transaction signature
+    signature: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 // Data structure to facilitate building Transactions
@@ -1442,6 +1461,7 @@ impl TransactionBuilder {
             assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
         }
         let (compliance_witness, compliance_instance) = self.build_compliance_artifacts(rng);
+        let rcv = compliance_witness.rcv;
         let mut input_map = InputMap::new();
         input_map.insert("witness".to_string(), compliance_witness.into());
         // Compute the proof from the witness bytes
@@ -1454,11 +1474,24 @@ impl TransactionBuilder {
         for idx in 0..usize::from(self.created_count) {
             logic_instances.push((**self.created_logics[idx], self.created_logic_proofs[idx].clone()));
         }
-        Transaction {
+        // Construct the transaction
+        let mut tx = Transaction {
             logic_instances,
             compliance_instance,
             compliance_proof: prove_response.proof,
-        }
+            signature: None,
+        };
+        let tx_bytes = borsh::to_vec(&tx).expect("unable to hash transaction");
+        let tx_hash = keccak256(tx_bytes);
+        let msg = FieldElement::from_le_bytes_reduce(&tx_hash.0);
+        // Sign the transaction
+        let mut sk = rcv.to_bytes();
+        sk.reverse();
+        let signature = api
+            .schnorr_construct_signature(&msg.to_be_bytes(), &sk)
+            .expect("unable to sign transaction");
+        tx.signature = Some((signature.s, signature.e));
+        tx
     }
 }
 
