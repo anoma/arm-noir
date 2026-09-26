@@ -24,11 +24,6 @@ use nodes::read_bytes;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use std::io::Write;
 use std::io::Read;
-use elliptic_curve::Curve;
-use elliptic_curve::FieldBytesSize;
-use elliptic_curve::sec1::ModulusSize;
-use std::marker::PhantomData;
-use elliptic_curve::sec1::EncodedPoint;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";

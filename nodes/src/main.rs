@@ -1,5 +1,5 @@
 pub mod aggregator;
-pub mod client;
+pub mod types;
 pub mod wallet;
 pub mod merkle;
 pub mod verifier;
@@ -25,73 +25,73 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::primitives::Address;
 use std::io::Write;
 use std::collections::HashMap;
-use client::Resource;
-use client::DIGEST_BYTES;
+use types::Resource;
+use types::DIGEST_BYTES;
 use rand::Rng;
 use std::path::PathBuf;
-use client::TRANSFER_AUTH_CIRCUIT_PATH;
+use types::TRANSFER_AUTH_CIRCUIT_PATH;
 use barretenberg_rs::backends::FfiBackend;
 use barretenberg_rs::BarretenbergApi;
 use nodes::BarretenbergCircuit;
 use alloy::primitives::address;
 use wallet::NullifierKey;
 use alloy::primitives::keccak256;
-use client::TransferAuthWitness;
-use client::ValueInfo;
-use client::LabelInfo;
-use client::ForwarderInfo;
-use client::CALL_TYPE_WRAP;
-use client::CALL_TYPE_UNWRAP;
-use client::PermitInfo;
+use types::TransferAuthWitness;
+use types::ValueInfo;
+use types::LabelInfo;
+use types::ForwarderInfo;
+use types::CALL_TYPE_WRAP;
+use types::CALL_TYPE_UNWRAP;
+use types::PermitInfo;
 use noirc_abi::InputMap;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use client::MAX_ETH_ADDR_LEN;
-use client::ConsumedResourceWitness;
-use client::MerklePath;
+use types::MAX_ETH_ADDR_LEN;
+use types::ConsumedResourceWitness;
+use types::MerklePath;
 use acir::FieldElement;
 use acir::AcirField;
-use client::MAX_TREE_DEPTH;
-use client::MAX_CONSUMED;
-use client::MAX_CREATED;
-use client::ComplianceWitness;
-use client::EmbeddedCurveScalar;
-use client::COMPLIANCE_CIRCUIT_PATH;
+use types::MAX_TREE_DEPTH;
+use types::MAX_CONSUMED;
+use types::MAX_CREATED;
+use types::ComplianceWitness;
+use types::EmbeddedCurveScalar;
+use types::COMPLIANCE_CIRCUIT_PATH;
 use std::collections::BTreeSet;
-use client::Nullifier;
+use types::Nullifier;
 use borsh::{BorshSerialize, BorshDeserialize};
 use std::collections::BTreeMap;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::Signature;
-use client::ResourceLogicInstance;
-use client::AppData;
-use client::ExpirableBlob;
-use client::encode_wrap_forwarder_input;
-use client::encode_forwarder_calldata;
-use client::encode_unwrap_forwarder_input;
-use client::ConsumedResourcePublic;
+use types::ResourceLogicInstance;
+use types::AppData;
+use types::ExpirableBlob;
+use types::encode_wrap_forwarder_input;
+use types::encode_forwarder_calldata;
+use types::encode_unwrap_forwarder_input;
+use types::ConsumedResourcePublic;
 use barretenberg_rs::Backend;
 use alloy::primitives::hex;
-use client::CreatedResourcePublic;
+use types::CreatedResourcePublic;
 use bn254_blackbox_solver::multi_scalar_mul;
-use client::ComplianceInstance;
-use client::EmbeddedCurvePoint;
+use types::ComplianceInstance;
+use types::EmbeddedCurvePoint;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
 use std::cmp::Ordering;
-use client::EncryptionInfo;
+use types::EncryptionInfo;
 use wallet::GRUMPKIN_PUBLIC_KEY_LEN;
-use client::ENCRYPTION_NONCE_LEN;
-use client::ResourceWithLabel;
-use client::DISCOVERY_NONCE_LEN;
+use types::ENCRYPTION_NONCE_LEN;
+use types::ResourceWithLabel;
+use types::DISCOVERY_NONCE_LEN;
 use k256::SecretKey;
 use k256::ecdh::diffie_hellman;
-use client::DISCOVERY_PK_LEN;
-use client::DISCOVERY_SHARED_POINT_LEN;
-use client::Ciphertext;
+use types::DISCOVERY_PK_LEN;
+use types::DISCOVERY_SHARED_POINT_LEN;
+use types::Ciphertext;
 use barretenberg_rs::generated_types::CircuitProveResponse;
 use barretenberg_rs::BarretenbergError;
-use client::Commitment;
+use types::Commitment;
 use std::marker::PhantomData;
-use client::DISCOVERY_CIPHERTEXT_LEN;
+use types::DISCOVERY_CIPHERTEXT_LEN;
 use merkle::CmtNode;
 use merkle::CommitmentTree;
 use std::cell::LazyCell;
@@ -519,7 +519,7 @@ impl ClientState {
         for (current_pos, resource) in &state.note_map {
             for fvk in fvks {
                 if resource.resource.nk_commitment == fvk.nullifier_key.commit().0 {
-                    let nullifier_key = client::NullifierKey { bytes: fvk.nullifier_key.0 };
+                    let nullifier_key = types::NullifierKey { bytes: fvk.nullifier_key.0 };
                     let nullifier = resource.resource.nullifier(nullifier_key);
                     state.nf_map.insert(nullifier, *current_pos);
                     state.pos_map.entry(fvk.clone()).or_default().insert(*current_pos);
@@ -770,7 +770,7 @@ impl TransactionBuilder {
                 resource: note.clone(),
                 is_consumed,
                 action_root,
-                nullifier_key: Some(client::NullifierKey { bytes: spending_key.nullifier_key.0 }),
+                nullifier_key: Some(types::NullifierKey { bytes: spending_key.nullifier_key.0 }),
                 value_info: Some(value_info),
                 encryption_info: None,
                 label_info: None,
@@ -788,7 +788,7 @@ impl TransactionBuilder {
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
             resource: note.clone(),
-            nf_key: client::NullifierKey { bytes: spending_key.nullifier_key.0 },
+            nf_key: types::NullifierKey { bytes: spending_key.nullifier_key.0 },
             cm_merkle_path: MerklePath {
                 path: circuit_path,
                 depth: MAX_TREE_DEPTH,
@@ -872,7 +872,7 @@ impl TransactionBuilder {
             resource,
             is_consumed,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+            nullifier_key: Some(types::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
             encryption_info: None,
             label_info: Some(label_info),
@@ -882,7 +882,7 @@ impl TransactionBuilder {
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
             resource,
-            nf_key: client::NullifierKey { bytes: nullifier_key.0 },
+            nf_key: types::NullifierKey { bytes: nullifier_key.0 },
             cm_merkle_path: MerklePath {
                 path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
                 depth: MAX_TREE_DEPTH,
@@ -1136,7 +1136,7 @@ impl TransactionBuilder {
             resource,
             is_consumed,
             action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            nullifier_key: Some(client::NullifierKey { bytes: nullifier_key.0 }),
+            nullifier_key: Some(types::NullifierKey { bytes: nullifier_key.0 }),
             value_info: None,
             encryption_info: None,
             label_info: Some(label_info),
