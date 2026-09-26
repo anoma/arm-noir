@@ -50,6 +50,7 @@ pub struct ShieldedPool {
 }
 
 impl ShieldedPool {
+    // Initialize a new empty shielded pool
     pub fn new<B: Backend>(api: &mut BarretenbergApi<B>) -> Self {
         // Include an anchor for the empty tree
         let mut anchors = BTreeSet::default();
@@ -62,15 +63,18 @@ impl ShieldedPool {
             logic_circuits: BTreeMap::default(),
         }
     }
-    
+
+    // Make the pool support the given logic circuit
     pub fn register_logic(&mut self, logic_circuit: BarretenbergCircuit) {
         self.logic_circuits.insert(logic_circuit.compute_vk_response.hash.clone(), logic_circuit);
     }
 
+    // Stop the pool from supporting the given logic cicuit
     pub fn deregister_logic(&mut self, logic_hash: Vec<u8>) -> Option<BarretenbergCircuit> {
         self.logic_circuits.remove(&logic_hash)
     }
-    
+
+    // Validate the given transaction and update pool state if necessary
     pub fn submit<B: Backend>(
         &mut self,
         api: &mut BarretenbergApi<B>,

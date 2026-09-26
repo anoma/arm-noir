@@ -1,11 +1,7 @@
 //! Implementation of a Merkle tree of commitments used to prove the existence of notes.
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use core::convert::TryFrom;
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::iter::repeat;
 use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::Backend;
 use crate::DIGEST_BYTES;
@@ -13,11 +9,9 @@ use acir::FieldElement;
 use acir::AcirField;
 use alloy::primitives::keccak256;
 
-const SAPLING_COMMITMENT_TREE_DEPTH: usize = crate::MAX_TREE_DEPTH;
-
 /// A constant padding leaf used in Merkle trees.
 /// This was computed from sha256("EMPTY")
-const PADDING_LEAF: [u8; DIGEST_BYTES] = [
+pub const PADDING_LEAF: [u8; DIGEST_BYTES] = [
     0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a,
     0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
     0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56,
@@ -26,7 +20,7 @@ const PADDING_LEAF: [u8; DIGEST_BYTES] = [
 /// The above constant as a commitment tree node.
 /// Note that nodes internally represent numbers
 /// in big-endian byte order.
-const PADDING_LEAF_CMT_NODE: CmtNode = CmtNode([
+pub const PADDING_LEAF_CMT_NODE: CmtNode = CmtNode([
     0x06, 0x7b, 0xab, 0x0f, 0xc6, 0xf8, 0x3e, 0x63,
     0x56, 0xc0, 0x4f, 0x06, 0x5e, 0xaa, 0xe7, 0x40,
     0x1f, 0x87, 0x8a, 0xee, 0xf9, 0x1d, 0x43, 0xec,
@@ -34,7 +28,7 @@ const PADDING_LEAF_CMT_NODE: CmtNode = CmtNode([
 ]);
 /// A constant padding leaf used in Merkle trees.
 /// This was computed from sha256("EMPTY")
-const PADDING_LEAF_ACT_NODE: ActNode = ActNode([
+pub const PADDING_LEAF_ACT_NODE: ActNode = ActNode([
     0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a,
     0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
     0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56,
