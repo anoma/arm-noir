@@ -132,7 +132,6 @@ Query the balance of a specific wallet alias or address:
 
 ```bash
 cargo run --release -- client balance \
-    --rpc http://127.0.0.1:8545 \
     --pool local_pool.bin \
     --owner my_shielded_key
 
@@ -143,7 +142,6 @@ Move tokens between addresses or aliases. Depending on the `from` and `to` alias
 
 ```bash
 cargo run --release -- client transfer \
-    --rpc http://127.0.0.1:8545 \
     --from my_transparent_key \
     --to my_shielded_key \
     --amount 100 \
