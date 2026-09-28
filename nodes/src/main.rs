@@ -1,47 +1,47 @@
 pub mod aggregator;
-pub mod types;
-pub mod wallet;
-pub mod merkle;
-pub mod verifier;
 pub mod client;
+pub mod merkle;
+pub mod types;
+pub mod verifier;
+pub mod wallet;
 
-use nodes::init_srs;
-use clap::{Parser, Args, Subcommand};
-use aggregator::BarretenbergAggregator;
-use std::ops::RangeFrom;
-use aggregator::RecursiveAggregator;
-use aggregator::VerifierInputs;
-use aggregator::ThreadedAggregator;
-use aggregator::TcpAggregatorServer;
 use aggregator::Aggregator;
+use aggregator::BarretenbergAggregator;
+use aggregator::RecursiveAggregator;
+use aggregator::TcpAggregatorServer;
+use aggregator::ThreadedAggregator;
+use aggregator::VerifierInputs;
+use alloy::primitives::Address;
+use alloy::primitives::address;
+use alloy::primitives::keccak256;
+use alloy::signers::local::PrivateKeySigner;
+use barretenberg_rs::BarretenbergApi;
+use barretenberg_rs::backends::FfiBackend;
+use borsh::BorshDeserialize;
+use clap::{Args, Parser, Subcommand};
+use client::ClientState;
+use client::TransactionBuilder;
+use nodes::BarretenbergCircuit;
+use nodes::init_srs;
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::ToSocketAddrs;
-use wallet::Store;
+use std::ops::RangeFrom;
+use std::path::Path;
+use std::path::PathBuf;
+use types::DIGEST_BYTES;
+use types::ERC20_TOKEN_ADDR_LEN;
+use types::EmbeddedCurvePoint;
+use types::EmbeddedCurveScalar;
+use types::FORWARDER_ADDR_LEN;
+use types::TRANSFER_AUTH_CIRCUIT_PATH;
+use verifier::ShieldedPool;
+use wallet::Bech32;
+use wallet::Bech32Encoded;
 use wallet::ExtendedFullViewingKey;
 use wallet::ExtendedSpendingKey;
 use wallet::PaymentAddress;
-use wallet::Bech32;
-use wallet::Bech32Encoded;
-use std::path::Path;
-use alloy::signers::local::PrivateKeySigner;
-use alloy::primitives::Address;
-use std::io::Write;
-use std::collections::HashMap;
-use types::DIGEST_BYTES;
-use types::TRANSFER_AUTH_CIRCUIT_PATH;
-use barretenberg_rs::backends::FfiBackend;
-use barretenberg_rs::BarretenbergApi;
-use nodes::BarretenbergCircuit;
-use alloy::primitives::address;
-use alloy::primitives::keccak256;
-use types::EmbeddedCurveScalar;
-use types::EmbeddedCurvePoint;
-use client::ClientState;
-use types::FORWARDER_ADDR_LEN;
-use types::ERC20_TOKEN_ADDR_LEN;
-use std::path::PathBuf;
-use verifier::ShieldedPool;
-use borsh::BorshDeserialize;
-use client::TransactionBuilder;
+use wallet::Store;
 
 // ERC-20 forwarder address
 const ERC20_FORWARDER_ADDRESS: Address = address!("0x0A62bE41E66841f693f922991C4e40C89cb0CFDF");
@@ -69,7 +69,6 @@ struct AggregatorArgs {
     #[arg(long)]
     thread_count: usize,
 }
-
 
 #[derive(Subcommand)]
 enum WalletCommands {
@@ -289,7 +288,9 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
             }
 
             if decrypt {
-                if store.spending_keys.contains_key(&alias) || store.signing_keys.contains_key(&alias) {
+                if store.spending_keys.contains_key(&alias)
+                    || store.signing_keys.contains_key(&alias)
+                {
                     let passphrase = prompt_passphrase("Enter passphrase to decrypt keys: ");
 
                     if store.spending_keys.contains_key(&alias) {
@@ -344,7 +345,15 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let store = Store::load(wallet_path).unwrap_or_default();
     let mut rng = rand::thread_rng();
     match cli {
-        ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
+        ClientCommands::Transfer {
+            rpc,
+            from,
+            to,
+            token,
+            amount,
+            pool,
+            signer,
+        } => {
             // Load up the transfer authorization circuit from disk
             let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
             let logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
@@ -358,7 +367,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             shielded_pool.register_logic(logic_circuit);
             let mut builder = TransactionBuilder::new(&mut api);
             // The resource logic reference is the UltraHonk verification key hash
-            let logic_ref = builder.logic_circuit
+            let logic_ref = builder
+                .logic_circuit
                 .compute_vk_response
                 .hash
                 .clone()
@@ -375,7 +385,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // Compute the label reference
             let erc20_token_addr = store.evaluate_address(&token)?;
             let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
-            label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
+            label_ref_bytes[..FORWARDER_ADDR_LEN]
+                .copy_from_slice(&ERC20_FORWARDER_ADDRESS.as_slice());
             label_ref_bytes[FORWARDER_ADDR_LEN..].copy_from_slice(erc20_token_addr.as_slice());
             let label_ref = keccak256(label_ref_bytes);
             // Data about transaction change
@@ -388,9 +399,15 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                     prompt_passphrase(&format!("Enter passphrase to decrypt {}: ", from));
                 let spending_key = store.decrypt_spending_key(from, passphrase)?;
                 // First synchronize the client state
-                let mut client_state = ClientState::synchronize(&mut api, shielded_pool.clone(), &[spending_key.to_viewing_key()]);
+                let mut client_state = ClientState::synchronize(
+                    &mut api,
+                    shielded_pool.clone(),
+                    &[spending_key.to_viewing_key()],
+                );
                 let payment_addr = spending_key.to_viewing_key().to_payment_address();
-                if let Some(note_positions) = client_state.pos_map.get(&spending_key.to_viewing_key()) {
+                if let Some(note_positions) =
+                    client_state.pos_map.get(&spending_key.to_viewing_key())
+                {
                     for pos in note_positions {
                         // Only consider notes that have not yet been spent
                         if client_state.spent_notes.contains(pos) || value_acc >= amount.into() {
@@ -398,7 +415,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                         }
                         // Get the note
                         let note = client_state.note_map.get(pos).expect("Missing note");
-                        if !(note.resource.logic_ref == logic_ref && note.resource.label_ref == label_ref) {
+                        if !(note.resource.logic_ref == logic_ref
+                            && note.resource.label_ref == label_ref)
+                        {
                             continue;
                         }
                         value_acc += note.resource.quantity;
@@ -414,7 +433,11 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 // Send the change back to the sender if there's any
                 assert!(value_acc >= amount.into());
                 if value_acc > amount.into() {
-                    change = Some((payment_addr, erc20_token_addr, value_acc - u128::from(amount)));
+                    change = Some((
+                        payment_addr,
+                        erc20_token_addr,
+                        value_acc - u128::from(amount),
+                    ));
                 }
             } else if let Ok(addr) = store.evaluate_address(&from) {
                 builder.add_transparent_input(
@@ -464,8 +487,13 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             // Save the updated state
             let state_bytes = borsh::to_vec(&shielded_pool)?;
             std::fs::write(&pool, state_bytes)?;
-        },
-        ClientCommands::Balance { rpc, pool, signer, owner } => {
+        }
+        ClientCommands::Balance {
+            rpc,
+            pool,
+            signer,
+            owner,
+        } => {
             // The state of the shielded pool
             let shielded_pool = if let Ok(state_bytes) = std::fs::read(&pool) {
                 ShieldedPool::try_from_slice(&state_bytes)?
@@ -476,7 +504,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             if let Ok(vk) = store.evaluate_viewing_key(&owner) {
                 let mut value_acc = HashMap::<_, u128>::new();
                 // First synchronize the client state
-                let client_state = ClientState::synchronize(&mut api, shielded_pool.clone(), &[vk.clone()]);
+                let client_state =
+                    ClientState::synchronize(&mut api, shielded_pool.clone(), &[vk.clone()]);
                 if let Some(note_positions) = client_state.pos_map.get(&vk) {
                     for pos in note_positions {
                         // Only consider notes that have not yet been spent
@@ -484,7 +513,8 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                             // Get the note
                             let note = client_state.note_map.get(pos).expect("Missing note");
                             // Accumulate the value of this note
-                            *value_acc.entry(&note.erc20_token_addr).or_default() += note.resource.quantity;
+                            *value_acc.entry(&note.erc20_token_addr).or_default() +=
+                                note.resource.quantity;
                         }
                     }
                 }
@@ -502,7 +532,7 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             } else {
                 panic!("unable to find from alias");
             }
-        },
+        }
     }
     Ok(())
 }
@@ -517,15 +547,15 @@ fn main() -> Result<(), std::io::Error> {
         Cli::Aggregator(args) => {
             // Finally, start the aggregator server
             aggregator_server(&args.address, args.thread_count);
-        },
+        }
         Cli::Client(cmds) => {
             // Delegate to client functions
             handle_client(cmds)?;
-        },
+        }
         Cli::Wallet(cmds) => {
             // Delegate to wallet functions
             handle_wallet(cmds)?
-        },
+        }
     }
     Ok(())
 }

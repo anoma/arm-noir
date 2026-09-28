@@ -1,13 +1,14 @@
 use acir::SerializationFormat;
 use acir::circuit::Program;
+use barretenberg_rs::Backend;
 use barretenberg_rs::BarretenbergApi;
+use barretenberg_rs::BarretenbergError;
 use barretenberg_rs::backends::FfiBackend;
 use barretenberg_rs::generated_types::CircuitComputeVkResponse;
-use barretenberg_rs::generated_types::ProofSystemSettings;
-use barretenberg_rs::generated_types::{CircuitInput, CircuitInputNoVK};
 use barretenberg_rs::generated_types::CircuitProveResponse;
 use barretenberg_rs::generated_types::CircuitVerifyResponse;
-use barretenberg_rs::BarretenbergError;
+use barretenberg_rs::generated_types::ProofSystemSettings;
+use barretenberg_rs::generated_types::{CircuitInput, CircuitInputNoVK};
 use bn254_blackbox_solver::Bn254BlackBoxSolver;
 use nargo::foreign_calls::transcript::ReplayForeignCallExecutor;
 use nargo::foreign_calls::{DefaultForeignCallBuilder, layers};
@@ -16,13 +17,12 @@ use noir_artifact_cli::execution::ExecutionResults;
 use noir_artifact_cli::execution::ReturnValues;
 use noirc_abi::InputMap;
 use noirc_artifacts::program::CompiledProgram;
-use std::io::Read;
-use std::path::PathBuf;
-use barretenberg_rs::Backend;
-use std::ops::{Add, Sub, AddAssign, SubAssign};
-use std::cmp::Ordering;
-use std::rc::Rc;
 use std::cell::LazyCell;
+use std::cmp::Ordering;
+use std::io::Read;
+use std::ops::{Add, AddAssign, Sub, SubAssign};
+use std::path::PathBuf;
+use std::rc::Rc;
 
 /// The directory containing the common reference string
 const CRS_DIR: &str = ".bb-crs";
@@ -241,18 +241,28 @@ pub type Promise<T> = Rc<LazyCell<T, Box<dyn Fn() -> T>>>;
 
 pub trait PromiseExt<T> {
     // Delay the given computation
-    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static;
+    fn delay<F>(f: F) -> Self
+    where
+        F: Fn() -> T + 'static;
 
     // A promise that returns the default value
-    fn default() -> Self where T: Default;
+    fn default() -> Self
+    where
+        T: Default;
 }
 
 impl<T> PromiseExt<T> for Promise<T> {
-    fn delay<F>(f: F) -> Self where F: Fn() -> T + 'static {
+    fn delay<F>(f: F) -> Self
+    where
+        F: Fn() -> T + 'static,
+    {
         Rc::new(LazyCell::new(Box::new(f)))
     }
 
-    fn default() -> Self where T: Default {
+    fn default() -> Self
+    where
+        T: Default,
+    {
         Promise::delay(|| Default::default())
     }
 }
@@ -268,26 +278,41 @@ pub struct SignMagnitude<T> {
 
 impl<T> From<T> for SignMagnitude<T> {
     fn from(magnitude: T) -> Self {
-        Self { sign: false, magnitude }
+        Self {
+            sign: false,
+            magnitude,
+        }
     }
 }
 
 impl<T: Default> Default for SignMagnitude<T> {
     fn default() -> Self {
-        Self { sign: false, magnitude: T::default() }
+        Self {
+            sign: false,
+            magnitude: T::default(),
+        }
     }
 }
 
 impl<U, T: Add<Output = U> + Sub<Output = U> + Ord> Add for SignMagnitude<T> {
     type Output = SignMagnitude<U>;
-    
+
     fn add(self, rhs: Self) -> Self::Output {
         if self.sign == rhs.sign {
-            SignMagnitude::<U> { sign: self.sign, magnitude: self.magnitude + rhs.magnitude }
+            SignMagnitude::<U> {
+                sign: self.sign,
+                magnitude: self.magnitude + rhs.magnitude,
+            }
         } else if self.magnitude >= rhs.magnitude {
-            SignMagnitude::<U> { sign: self.sign, magnitude: self.magnitude - rhs.magnitude }
+            SignMagnitude::<U> {
+                sign: self.sign,
+                magnitude: self.magnitude - rhs.magnitude,
+            }
         } else {
-            SignMagnitude::<U> { sign: rhs.sign, magnitude: rhs.magnitude - self.magnitude }
+            SignMagnitude::<U> {
+                sign: rhs.sign,
+                magnitude: rhs.magnitude - self.magnitude,
+            }
         }
     }
 }
@@ -307,7 +332,7 @@ impl<T: AddAssign + SubAssign + Ord> AddAssign for SignMagnitude<T> {
 
 impl<U, T: Add<Output = U> + Sub<Output = U> + Ord> Sub for SignMagnitude<T> {
     type Output = SignMagnitude<U>;
-    
+
     fn sub(self, mut rhs: Self) -> Self::Output {
         rhs.sign = !rhs.sign;
         self + rhs

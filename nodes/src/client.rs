@@ -1,82 +1,82 @@
-use std::collections::BTreeSet;
-use crate::types::Nullifier;
-use borsh::{BorshSerialize, BorshDeserialize};
-use std::collections::BTreeMap;
-use crate::wallet::GRUMPKIN_PUBLIC_KEY_LEN;
-use std::collections::HashMap;
-use crate::merkle::CommitmentTree;
+use crate::ERC20_FORWARDER_ADDRESS;
+use crate::TRANSFER_AUTH_CIRCUIT_PATH;
+use crate::merkle::ActNode;
 use crate::merkle::CmtNode;
-use crate::wallet::ExtendedFullViewingKey;
-use barretenberg_rs::BarretenbergApi;
-use barretenberg_rs::Backend;
-use crate::verifier::ShieldedPool;
+use crate::merkle::CommitmentTree;
+use crate::types::AES_KEY_LEN;
+use crate::types::AppData;
+use crate::types::CALL_TYPE_UNWRAP;
+use crate::types::CALL_TYPE_WRAP;
+use crate::types::COMPLIANCE_CIRCUIT_PATH;
 use crate::types::Ciphertext;
-use crate::types::EmbeddedCurvePoint;
-use k256::ecdh::diffie_hellman;
-use alloy::primitives::keccak256;
-use crate::types::ResourceWithLabel;
+use crate::types::ComplianceInstance;
+use crate::types::ComplianceWitness;
+use crate::types::ConsumedResourcePublic;
+use crate::types::ConsumedResourceWitness;
+use crate::types::CreatedResourcePublic;
+use crate::types::DIGEST_BYTES;
+use crate::types::DISCOVERY_NONCE_LEN;
 use crate::types::DISCOVERY_PK_LEN;
 use crate::types::DISCOVERY_SHARED_POINT_LEN;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use crate::types::AES_KEY_LEN;
-use crate::types::MAX_TREE_DEPTH;
-use crate::types::NullifierKey;
-use nodes::pad_slice;
-use crate::types::Resource;
-use crate::types::TransferAuthWitness;
-use crate::types::ValueInfo;
-use crate::types::LabelInfo;
-use crate::types::ForwarderInfo;
-use crate::types::CALL_TYPE_WRAP;
-use crate::types::CALL_TYPE_UNWRAP;
-use crate::types::PermitInfo;
-use noirc_abi::InputMap;
-use crate::types::MAX_ETH_ADDR_LEN;
-use crate::types::ConsumedResourceWitness;
-use crate::types::MerklePath;
-use acir::FieldElement;
-use acir::AcirField;
-use crate::types::COMPLIANCE_CIRCUIT_PATH;
-use k256::ecdsa::signature::hazmat::PrehashSigner;
-use k256::ecdsa::Signature;
-use crate::types::ResourceLogicInstance;
-use crate::types::AppData;
-use crate::types::ExpirableBlob;
-use crate::types::encode_wrap_forwarder_input;
-use crate::types::encode_forwarder_calldata;
-use crate::types::encode_unwrap_forwarder_input;
-use crate::types::ConsumedResourcePublic;
+use crate::types::ERC20_TOKEN_ADDR_LEN;
+use crate::types::EmbeddedCurvePoint;
+use crate::types::EmbeddedCurveScalar;
 use crate::types::EncryptionInfo;
-use crate::types::DISCOVERY_NONCE_LEN;
-use k256::SecretKey;
-use std::cell::OnceCell;
-use std::rc::Rc;
-use crate::merkle::ActNode;
-use rand::Rng;
-use std::path::PathBuf;
+use crate::types::ExpirableBlob;
+use crate::types::FORWARDER_ADDR_LEN;
+use crate::types::ForwarderInfo;
+use crate::types::LabelInfo;
+use crate::types::MAX_AUTH_PK_LEN;
 use crate::types::MAX_CONSUMED;
 use crate::types::MAX_CREATED;
-use crate::types::ComplianceWitness;
-use crate::types::ComplianceInstance;
-use crate::types::DIGEST_BYTES;
-use crate::types::CreatedResourcePublic;
-use bn254_blackbox_solver::multi_scalar_mul;
-use crate::types::EmbeddedCurveScalar;
-use nodes::SignMagnitude;
-use nodes::Promise;
-use crate::types::FORWARDER_ADDR_LEN;
-use crate::types::MAX_UNTAGGED_ENCRYPTION_PK_LEN;
-use crate::types::MAX_AUTH_PK_LEN;
-use nodes::BarretenbergCircuit;
-use crate::wallet::ExtendedSpendingKey;
-use crate::types::ERC20_TOKEN_ADDR_LEN;
-use nodes::PromiseExt;
-use crate::ERC20_FORWARDER_ADDRESS;
-use alloy::primitives::Address;
-use crate::TRANSFER_AUTH_CIRCUIT_PATH;
-use crate::wallet::PaymentAddress;
-use alloy::primitives::hex;
+use crate::types::MAX_ETH_ADDR_LEN;
 use crate::types::MAX_OUTPUT_LEN;
+use crate::types::MAX_TREE_DEPTH;
+use crate::types::MAX_UNTAGGED_ENCRYPTION_PK_LEN;
+use crate::types::MerklePath;
+use crate::types::Nullifier;
+use crate::types::NullifierKey;
+use crate::types::PermitInfo;
+use crate::types::Resource;
+use crate::types::ResourceLogicInstance;
+use crate::types::ResourceWithLabel;
+use crate::types::TransferAuthWitness;
+use crate::types::ValueInfo;
+use crate::types::encode_forwarder_calldata;
+use crate::types::encode_unwrap_forwarder_input;
+use crate::types::encode_wrap_forwarder_input;
+use crate::verifier::ShieldedPool;
+use crate::wallet::ExtendedFullViewingKey;
+use crate::wallet::ExtendedSpendingKey;
+use crate::wallet::GRUMPKIN_PUBLIC_KEY_LEN;
+use crate::wallet::PaymentAddress;
+use acir::AcirField;
+use acir::FieldElement;
+use alloy::primitives::Address;
+use alloy::primitives::hex;
+use alloy::primitives::keccak256;
+use barretenberg_rs::Backend;
+use barretenberg_rs::BarretenbergApi;
+use bn254_blackbox_solver::multi_scalar_mul;
+use borsh::{BorshDeserialize, BorshSerialize};
+use k256::SecretKey;
+use k256::ecdh::diffie_hellman;
+use k256::ecdsa::Signature;
+use k256::ecdsa::signature::hazmat::PrehashSigner;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use nodes::BarretenbergCircuit;
+use nodes::Promise;
+use nodes::PromiseExt;
+use nodes::SignMagnitude;
+use nodes::pad_slice;
+use noirc_abi::InputMap;
+use rand::Rng;
+use std::cell::OnceCell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 pub static INITIAL_ROOT: [u8; 32] =
     hex!("c9d5969b3cbdef3fe2f655d5b7644da065f6adab6e612236932bfc4412f46308");
@@ -153,7 +153,10 @@ impl TransactionBuilder {
         }
     }
 
-    fn build_label_info(forwarder_addr: &Address, token_addr: &Address) -> (LabelInfo, [u8; DIGEST_BYTES]) {
+    fn build_label_info(
+        forwarder_addr: &Address,
+        token_addr: &Address,
+    ) -> (LabelInfo, [u8; DIGEST_BYTES]) {
         // Compute the label reference
         let mut label_ref_bytes = [0u8; FORWARDER_ADDR_LEN + ERC20_TOKEN_ADDR_LEN];
         label_ref_bytes[..FORWARDER_ADDR_LEN].copy_from_slice(forwarder_addr.as_slice());
@@ -181,7 +184,12 @@ impl TransactionBuilder {
         // The value info
         let payment_addr = spending_key.to_viewing_key().to_payment_address();
         let value_info = ValueInfo {
-            auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            auth_pk: payment_addr
+                .verifying_key
+                .to_encoded_point(false)
+                .as_bytes()
+                .try_into()
+                .unwrap(),
             encryption_pk: payment_addr.encryption_public_key,
         };
         // The transfer authorization witness
@@ -189,14 +197,21 @@ impl TransactionBuilder {
         let is_consumed = true;
         let logic_witness = Promise::delay(move || {
             // The action root
-            let action_root: [u8; DIGEST_BYTES] = *action_root_clone.get().expect("action root must be initialized first");
+            let action_root: [u8; DIGEST_BYTES] = *action_root_clone
+                .get()
+                .expect("action root must be initialized first");
             // Sign over the resource
-            let auth_sig: Signature = spending_key.signing_key.sign_prehash(&action_root).expect("unable to sign resource");
+            let auth_sig: Signature = spending_key
+                .signing_key
+                .sign_prehash(&action_root)
+                .expect("unable to sign resource");
             TransferAuthWitness {
                 resource: note.clone(),
                 is_consumed,
                 action_root,
-                nullifier_key: Some(NullifierKey { bytes: spending_key.nullifier_key.0 }),
+                nullifier_key: Some(NullifierKey {
+                    bytes: spending_key.nullifier_key.0,
+                }),
                 value_info: Some(value_info),
                 encryption_info: None,
                 label_info: None,
@@ -214,23 +229,29 @@ impl TransactionBuilder {
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
             resource: note.clone(),
-            nf_key: NullifierKey { bytes: spending_key.nullifier_key.0 },
+            nf_key: NullifierKey {
+                bytes: spending_key.nullifier_key.0,
+            },
             cm_merkle_path: MerklePath {
                 path: circuit_path,
                 depth: MAX_TREE_DEPTH,
             },
         };
         let resource_commitment = note.commitment();
-        let resource_nullifier = note
-            .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+        let resource_nullifier =
+            note.nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_nullifier,
-            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            action_root: *action_root_clone
+                .get()
+                .expect("action root must be initialized first"),
             is_consumed,
             app_data: AppData::default(),
         });
-        let commitment_tree_root = compliance_witness.cm_merkle_path.root(api, resource_commitment);
+        let commitment_tree_root = compliance_witness
+            .cm_merkle_path
+            .root(api, resource_commitment);
         let compliance_public = ConsumedResourcePublic {
             resource_nullifier,
             resource_logic_ref: note.logic_ref,
@@ -257,7 +278,8 @@ impl TransactionBuilder {
             panic!("Transaction inputs cannot be added after transparent outputs");
         }
         // Compute the label reference
-        let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
+        let (label_info, label_ref) =
+            Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
         let mut rand_seed = [0u8; DIGEST_BYTES];
         rng.fill(&mut rand_seed);
@@ -297,8 +319,12 @@ impl TransactionBuilder {
         let logic_witness = Promise::delay(move || TransferAuthWitness {
             resource,
             is_consumed,
-            action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            nullifier_key: Some(NullifierKey { bytes: nullifier_key.0 }),
+            action_root: *action_root_clone
+                .get()
+                .expect("action root must be initialized first"),
+            nullifier_key: Some(NullifierKey {
+                bytes: nullifier_key.0,
+            }),
             value_info: None,
             encryption_info: None,
             label_info: Some(label_info),
@@ -308,15 +334,17 @@ impl TransactionBuilder {
         // Compliance witness
         let compliance_witness = ConsumedResourceWitness {
             resource,
-            nf_key: NullifierKey { bytes: nullifier_key.0 },
+            nf_key: NullifierKey {
+                bytes: nullifier_key.0,
+            },
             cm_merkle_path: MerklePath {
                 path: [(FieldElement::zero(), false); MAX_TREE_DEPTH],
                 depth: MAX_TREE_DEPTH,
             },
         };
         let resource_commitment = resource.commitment();
-        let resource_nullifier = resource
-            .nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
+        let resource_nullifier =
+            resource.nullifier_from_commitment(compliance_witness.nf_key, resource_commitment);
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || {
             // Encode forwarder calldata
@@ -326,7 +354,9 @@ impl TransactionBuilder {
                 permit_info.permit_nonce,
                 permit_info.permit_deadline,
                 forwarder_info.ethereum_account_addr,
-                *action_root_clone.get().expect("action root must be initialized first"),
+                *action_root_clone
+                    .get()
+                    .expect("action root must be initialized first"),
                 permit_info.permit_sig,
             );
             let (data, data_len) = encode_forwarder_calldata(
@@ -344,7 +374,9 @@ impl TransactionBuilder {
             app_data.external_payload_len = 1;
             ResourceLogicInstance {
                 tag: resource_nullifier,
-                action_root: *action_root_clone.get().expect("action root must be initialized first"),
+                action_root: *action_root_clone
+                    .get()
+                    .expect("action root must be initialized first"),
                 is_consumed,
                 app_data,
             }
@@ -384,7 +416,13 @@ impl TransactionBuilder {
         let remainder = 16 - (plaintext.len() % 16);
         plaintext.resize(plaintext.len() + remainder, remainder as u8);
         // Finally do the encryptiion
-        let ciphertext = api.aes_encrypt(&plaintext, &nonce_padded, &hash[..AES_KEY_LEN], plaintext.len() as u32)
+        let ciphertext = api
+            .aes_encrypt(
+                &plaintext,
+                &nonce_padded,
+                &hash[..AES_KEY_LEN],
+                plaintext.len() as u32,
+            )
             .expect("unable to perform AES encryption")
             .ciphertext;
         (ciphertext, nonce)
@@ -400,15 +438,22 @@ impl TransactionBuilder {
         amount: u128,
     ) {
         // Compute the digest of the consumed nullifiers
-        let consumed_nullifiers_digest = Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
+        let consumed_nullifiers_digest =
+            Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
         // Compute the label reference
-        let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
+        let (label_info, label_ref) =
+            Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
         let mut rand_seed = [0u8; DIGEST_BYTES];
         rng.fill(&mut rand_seed);
         // The value info
         let value_info = ValueInfo {
-            auth_pk: payment_addr.verifying_key.to_encoded_point(false).as_bytes().try_into().unwrap(),
+            auth_pk: payment_addr
+                .verifying_key
+                .to_encoded_point(false)
+                .as_bytes()
+                .try_into()
+                .unwrap(),
             encryption_pk: payment_addr.encryption_public_key,
         };
         // Calculate persistent value reference
@@ -417,7 +462,8 @@ impl TransactionBuilder {
         value_ref_bytes[MAX_AUTH_PK_LEN..].copy_from_slice(&value_info.encryption_pk.to_bytes());
         let value_ref = keccak256(value_ref_bytes);
         // Derive the nonce
-        let nonce = Resource::derive_nonce(u32::from(self.created_count), consumed_nullifiers_digest);
+        let nonce =
+            Resource::derive_nonce(u32::from(self.created_count), consumed_nullifiers_digest);
         // The permanent resource
         let resource = Resource {
             value_ref: value_ref.0,
@@ -433,31 +479,46 @@ impl TransactionBuilder {
             resource: resource,
             forwarder_addr: label_info.forwarder_addr,
             erc20_token_addr: label_info.erc20_token_addr,
-        }).expect("Unable to serialize resource");
+        })
+        .expect("Unable to serialize resource");
         // Generate discovery ciphertext
         let discovery_sk = SecretKey::random(rng);
-        let discovery_shared_point = diffie_hellman(discovery_sk.to_nonzero_scalar(), payment_addr.discovery_public_key.as_affine());
+        let discovery_shared_point = diffie_hellman(
+            discovery_sk.to_nonzero_scalar(),
+            payment_addr.discovery_public_key.as_affine(),
+        );
         let mut discovery_concat = [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
-        discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(&payment_addr.discovery_public_key.to_encoded_point(false).as_bytes());
-        discovery_concat[DISCOVERY_PK_LEN..].copy_from_slice(&discovery_shared_point.raw_secret_bytes());
-        let (discovery_ciphertext, discovery_nonce) = Self::encrypt(api, rng, vec![0u8], &discovery_concat);
+        discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(
+            &payment_addr
+                .discovery_public_key
+                .to_encoded_point(false)
+                .as_bytes(),
+        );
+        discovery_concat[DISCOVERY_PK_LEN..]
+            .copy_from_slice(&discovery_shared_point.raw_secret_bytes());
+        let (discovery_ciphertext, discovery_nonce) =
+            Self::encrypt(api, rng, vec![0u8], &discovery_concat);
         let discovery_ciphertext = Ciphertext {
             cipher: discovery_ciphertext.try_into().unwrap(),
             nonce: discovery_nonce,
             pk: k256::AffinePoint::from(discovery_sk.public_key()),
-        }.to_bytes();
+        }
+        .to_bytes();
         // Generate encryption ciphertext
         let sender_sk = EmbeddedCurveScalar::random(rng);
         let shared_point = value_info.encryption_pk * sender_sk;
-        let mut encryption_concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
-        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&value_info.encryption_pk.to_bytes());
+        let mut encryption_concat = [0u8; 2 * GRUMPKIN_PUBLIC_KEY_LEN];
+        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN]
+            .copy_from_slice(&value_info.encryption_pk.to_bytes());
         encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&shared_point.to_bytes());
-        let (resource_ciphertext, encryption_nonce) = Self::encrypt(api, rng, payload_plaintext, &encryption_concat);
+        let (resource_ciphertext, encryption_nonce) =
+            Self::encrypt(api, rng, payload_plaintext, &encryption_concat);
         let resource_ciphertext = Ciphertext {
             cipher: resource_ciphertext.try_into().unwrap(),
             nonce: encryption_nonce,
             pk: EmbeddedCurvePoint::generator() * sender_sk,
-        }.to_bytes();
+        }
+        .to_bytes();
         let encryption_info = EncryptionInfo {
             discovery_ciphertext: pad_slice(&discovery_ciphertext),
             discovery_ciphertext_len: discovery_ciphertext.len() as u32,
@@ -470,7 +531,9 @@ impl TransactionBuilder {
         let witness = Promise::delay(move || TransferAuthWitness {
             resource,
             is_consumed,
-            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            action_root: *action_root_clone
+                .get()
+                .expect("action root must be initialized first"),
             nullifier_key: None,
             value_info: Some(value_info),
             encryption_info: Some(encryption_info),
@@ -499,7 +562,9 @@ impl TransactionBuilder {
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_commitment,
-            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            action_root: *action_root_clone
+                .get()
+                .expect("action root must be initialized first"),
             is_consumed,
             app_data,
         });
@@ -525,9 +590,11 @@ impl TransactionBuilder {
         amount: u128,
     ) {
         // Compute the digest of the consumed nullifiers
-        let consumed_nullifiers_digest = Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
+        let consumed_nullifiers_digest =
+            Resource::hash_nullifiers(self.consumed_nullifiers, self.consumed_count.into());
         // Compute the label reference
-        let (label_info, label_ref) = Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
+        let (label_info, label_ref) =
+            Self::build_label_info(&ERC20_FORWARDER_ADDRESS, &erc20_token_addr);
         // Generate randomness for the construction of the resource
         let mut rand_seed = [0u8; DIGEST_BYTES];
         rng.fill(&mut rand_seed);
@@ -537,7 +604,8 @@ impl TransactionBuilder {
         let mut value_ref = [0u8; 32];
         value_ref[0..MAX_ETH_ADDR_LEN].copy_from_slice(addr.as_slice());
         // Derive the nonce
-        let nonce = Resource::derive_nonce(u32::from(self.created_count), consumed_nullifiers_digest);
+        let nonce =
+            Resource::derive_nonce(u32::from(self.created_count), consumed_nullifiers_digest);
         // The permanent resource
         let resource = Resource {
             value_ref,
@@ -561,8 +629,12 @@ impl TransactionBuilder {
         let witness = Promise::delay(move || TransferAuthWitness {
             resource,
             is_consumed,
-            action_root: *action_root_clone.get().expect("action root must be initialized first"),
-            nullifier_key: Some(NullifierKey { bytes: nullifier_key.0 }),
+            action_root: *action_root_clone
+                .get()
+                .expect("action root must be initialized first"),
+            nullifier_key: Some(NullifierKey {
+                bytes: nullifier_key.0,
+            }),
             value_info: None,
             encryption_info: None,
             label_info: Some(label_info),
@@ -574,11 +646,8 @@ impl TransactionBuilder {
             forwarder_info.ethereum_account_addr,
             resource.quantity,
         );
-        let (data, data_len) = encode_forwarder_calldata(
-            label_info.forwarder_addr,
-            enc_input,
-            [0; MAX_OUTPUT_LEN],
-        );
+        let (data, data_len) =
+            encode_forwarder_calldata(label_info.forwarder_addr, enc_input, [0; MAX_OUTPUT_LEN]);
         // Finally, construct the application data
         let mut app_data = AppData::default();
         app_data.external_payload[0] = ExpirableBlob {
@@ -591,7 +660,9 @@ impl TransactionBuilder {
         let action_root_clone = self.action_root.clone();
         let logic_instance = Promise::delay(move || ResourceLogicInstance {
             tag: resource_commitment,
-            action_root: *action_root_clone.get().expect("action root must be initialized first"),
+            action_root: *action_root_clone
+                .get()
+                .expect("action root must be initialized first"),
             is_consumed,
             app_data,
         });
@@ -608,7 +679,10 @@ impl TransactionBuilder {
         self.created_count += 1;
     }
 
-    fn build_compliance_artifacts(&self, rng: &mut impl Rng) -> (ComplianceWitness, ComplianceInstance) {
+    fn build_compliance_artifacts(
+        &self,
+        rng: &mut impl Rng,
+    ) -> (ComplianceWitness, ComplianceInstance) {
         // Construct the compliance witness
         let compliance_witness = ComplianceWitness {
             consumed_data: self.consumed_data,
@@ -623,9 +697,13 @@ impl TransactionBuilder {
         let mut scalars_lo = vec![FieldElement::zero(); self.delta_map.len()];
         let mut scalars_hi = vec![FieldElement::zero(); self.delta_map.len()];
         for (idx, (point, quantity)) in self.delta_map.iter().enumerate() {
-            let signed_point = if *quantity >= SignMagnitude::default() { *point } else { -*point };
-            points[2*idx] = signed_point.x;
-            points[2*idx + 1] = signed_point.y;
+            let signed_point = if *quantity >= SignMagnitude::default() {
+                *point
+            } else {
+                -*point
+            };
+            points[2 * idx] = signed_point.x;
+            points[2 * idx + 1] = signed_point.y;
             scalars_lo[idx] = quantity.magnitude.into();
         }
         // Add the value commitment randomness
@@ -642,7 +720,10 @@ impl TransactionBuilder {
             consumed_count: self.consumed_count.into(),
             created_publics: self.created_publics,
             created_count: self.created_count.into(),
-            delta: EmbeddedCurvePoint { x: delta.0, y: delta.1 },
+            delta: EmbeddedCurvePoint {
+                x: delta.0,
+                y: delta.1,
+            },
         };
         (compliance_witness, compliance_instance)
     }
@@ -666,22 +747,30 @@ impl TransactionBuilder {
             (tags.len() - 1).ilog2() as usize + 1
         };
         let action_root = CommitmentTree::new(&mut (), action_tree_depth, &tags).root(&mut ());
-        self.action_root.set(action_root.0).expect("Unable to set action root");
+        self.action_root
+            .set(action_root.0)
+            .expect("Unable to set action root");
         // Generate input logic proofs
         for i in 0..usize::from(self.consumed_count) {
             let logic_witness = &self.consumed_witnesses[i];
             let compliance_witness = self.consumed_data[i];
             let logic_instance = &self.consumed_logics[i];
             let compliance_public = self.consumed_publics[i];
-            
+
             let mut input_map = InputMap::new();
             input_map.insert("witness".to_string(), (***logic_witness).into());
             // Compute the proof from the witness bytes
             let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
             self.consumed_logic_proofs[i] = prove_response.proof;
-            assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+            assert_eq!(
+                prove_response.public_inputs[0].clone(),
+                logic_instance.digest().to_be_bytes()
+            );
             // Accumulate delta
-            *self.delta_map.entry(compliance_witness.resource.kind(api)).or_default() += SignMagnitude::from(compliance_witness.resource.quantity);
+            *self
+                .delta_map
+                .entry(compliance_witness.resource.kind(api))
+                .or_default() += SignMagnitude::from(compliance_witness.resource.quantity);
         }
         // Generate output logic proofs
         for i in 0..usize::from(self.created_count) {
@@ -689,27 +778,45 @@ impl TransactionBuilder {
             let logic_instance = &self.created_logics[i];
             let compliance_public = self.created_publics[i];
             // Accumulate delta
-            *self.delta_map.entry(witness.resource.kind(api)).or_default() -= SignMagnitude::from(witness.resource.quantity);
+            *self
+                .delta_map
+                .entry(witness.resource.kind(api))
+                .or_default() -= SignMagnitude::from(witness.resource.quantity);
             let mut input_map = InputMap::new();
             input_map.insert("witness".to_string(), (***witness).into());
             // Compute the proof from the witness bytes
             let prove_response = self.logic_circuit.circuit_prove(api, input_map).unwrap();
             self.created_logic_proofs[i] = prove_response.proof;
-            assert_eq!(prove_response.public_inputs[0].clone(), logic_instance.digest().to_be_bytes());
+            assert_eq!(
+                prove_response.public_inputs[0].clone(),
+                logic_instance.digest().to_be_bytes()
+            );
         }
         let (compliance_witness, compliance_instance) = self.build_compliance_artifacts(rng);
         let rcv = compliance_witness.rcv;
         let mut input_map = InputMap::new();
         input_map.insert("witness".to_string(), compliance_witness.into());
         // Compute the proof from the witness bytes
-        let prove_response = self.compliance_circuit.circuit_prove(api, input_map).unwrap();
-        assert_eq!(prove_response.public_inputs[0].clone(), compliance_instance.digest().to_be_bytes());
+        let prove_response = self
+            .compliance_circuit
+            .circuit_prove(api, input_map)
+            .unwrap();
+        assert_eq!(
+            prove_response.public_inputs[0].clone(),
+            compliance_instance.digest().to_be_bytes()
+        );
         let mut logic_instances = vec![];
         for idx in 0..usize::from(self.consumed_count) {
-            logic_instances.push((**self.consumed_logics[idx], self.consumed_logic_proofs[idx].clone()));
+            logic_instances.push((
+                **self.consumed_logics[idx],
+                self.consumed_logic_proofs[idx].clone(),
+            ));
         }
         for idx in 0..usize::from(self.created_count) {
-            logic_instances.push((**self.created_logics[idx], self.created_logic_proofs[idx].clone()));
+            logic_instances.push((
+                **self.created_logics[idx],
+                self.created_logic_proofs[idx].clone(),
+            ));
         }
         // Construct the transaction
         let mut tx = Transaction {
@@ -750,7 +857,11 @@ pub struct ClientState {
 }
 
 impl ClientState {
-    pub fn synchronize<B: Backend>(api: &mut BarretenbergApi<B>, pool: ShieldedPool, fvks: &[ExtendedFullViewingKey]) -> Self {
+    pub fn synchronize<B: Backend>(
+        api: &mut BarretenbergApi<B>,
+        pool: ShieldedPool,
+        fvks: &[ExtendedFullViewingKey],
+    ) -> Self {
         let mut state = Self::default();
         // Track the encountered resource commitments
         let mut commitments = vec![];
@@ -758,7 +869,9 @@ impl ClientState {
         for transaction in pool.transactions {
             for (logic_instance, _) in transaction.logic_instances {
                 // Process only created resources
-                if logic_instance.is_consumed { continue; }
+                if logic_instance.is_consumed {
+                    continue;
+                }
                 let app_data = logic_instance.app_data;
                 for i in 0..app_data.discovery_payload_len {
                     // Attempt to deserialize resource ciphertext
@@ -777,58 +890,87 @@ impl ClientState {
                     };
                     for fvk in fvks {
                         // Attempt to decrypt discovery payload
-                        let discovery_shared_point = diffie_hellman(fvk.discovery_secret_key.to_nonzero_scalar(), discovery_ciphertext.pk);
-                        let discovery_public_key = fvk.discovery_secret_key.public_key().to_encoded_point(false);
-                        let mut discovery_concat = [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
-                        discovery_concat[..DISCOVERY_PK_LEN].copy_from_slice(&discovery_public_key.as_bytes());
-                        discovery_concat[DISCOVERY_PK_LEN..].copy_from_slice(&discovery_shared_point.raw_secret_bytes());
+                        let discovery_shared_point = diffie_hellman(
+                            fvk.discovery_secret_key.to_nonzero_scalar(),
+                            discovery_ciphertext.pk,
+                        );
+                        let discovery_public_key = fvk
+                            .discovery_secret_key
+                            .public_key()
+                            .to_encoded_point(false);
+                        let mut discovery_concat =
+                            [0u8; DISCOVERY_PK_LEN + DISCOVERY_SHARED_POINT_LEN];
+                        discovery_concat[..DISCOVERY_PK_LEN]
+                            .copy_from_slice(&discovery_public_key.as_bytes());
+                        discovery_concat[DISCOVERY_PK_LEN..]
+                            .copy_from_slice(&discovery_shared_point.raw_secret_bytes());
                         let key = &keccak256(discovery_concat)[..AES_KEY_LEN];
                         let nonce_padded = pad_slice::<16>(&discovery_ciphertext.nonce);
-                        let plaintext = api.aes_decrypt(
-                            &discovery_ciphertext.cipher,
-                            &nonce_padded,
-                            key,
-                            discovery_ciphertext.cipher.len() as u32,
-                        )
+                        let plaintext = api
+                            .aes_decrypt(
+                                &discovery_ciphertext.cipher,
+                                &nonce_padded,
+                                key,
+                                discovery_ciphertext.cipher.len() as u32,
+                            )
                             .expect("unable to perform AES decryption")
                             .plaintext;
                         // Padding scheme does not allow empty plaintexts
-                        if plaintext.len() == 0 { continue }
+                        if plaintext.len() == 0 {
+                            continue;
+                        }
                         // Grab the filler byte
                         let remainder = plaintext[plaintext.len() - 1];
                         // Ensure that the filler byte from the acceptable range
-                        if remainder == 0 || remainder > 16 || usize::from(remainder) > plaintext.len() { continue }
+                        if remainder == 0
+                            || remainder > 16
+                            || usize::from(remainder) > plaintext.len()
+                        {
+                            continue;
+                        }
                         // Ensure that the filler byte is consistently applied
-                        if plaintext[plaintext.len() - usize::from(remainder)..].iter().any(|&b| b != remainder) {
+                        if plaintext[plaintext.len() - usize::from(remainder)..]
+                            .iter()
+                            .any(|&b| b != remainder)
+                        {
                             continue;
                         }
                         // Finally, remove the padding
                         let plaintext = &plaintext[..plaintext.len() - usize::from(remainder)];
 
                         // Malformed payload, so skip resource decryption
-                        if plaintext != [0x00] { continue }
+                        if plaintext != [0x00] {
+                            continue;
+                        }
 
                         // Attempt to decrypt resource payload
-                        let resource_shared_point = resource_ciphertext.pk * fvk.encryption_secret_key;
-                        let encryption_pk = EmbeddedCurvePoint::generator() * fvk.encryption_secret_key;
-                        let mut encryption_concat = [0u8; 2*GRUMPKIN_PUBLIC_KEY_LEN];
-                        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN].copy_from_slice(&encryption_pk.to_bytes());
-                        encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..].copy_from_slice(&resource_shared_point.to_bytes());
+                        let resource_shared_point =
+                            resource_ciphertext.pk * fvk.encryption_secret_key;
+                        let encryption_pk =
+                            EmbeddedCurvePoint::generator() * fvk.encryption_secret_key;
+                        let mut encryption_concat = [0u8; 2 * GRUMPKIN_PUBLIC_KEY_LEN];
+                        encryption_concat[..GRUMPKIN_PUBLIC_KEY_LEN]
+                            .copy_from_slice(&encryption_pk.to_bytes());
+                        encryption_concat[GRUMPKIN_PUBLIC_KEY_LEN..]
+                            .copy_from_slice(&resource_shared_point.to_bytes());
                         let key = &keccak256(encryption_concat)[..AES_KEY_LEN];
                         let nonce_padded = pad_slice::<16>(&resource_ciphertext.nonce);
-                        let plaintext = api.aes_decrypt(
-                            &resource_ciphertext.cipher,
-                            &nonce_padded,
-                            key,
-                            resource_ciphertext.cipher.len() as u32,
-                        )
+                        let plaintext = api
+                            .aes_decrypt(
+                                &resource_ciphertext.cipher,
+                                &nonce_padded,
+                                key,
+                                resource_ciphertext.cipher.len() as u32,
+                            )
                             .expect("unable to perform AES decryption")
                             .plaintext;
                         let remainder = plaintext[plaintext.len() - 1];
                         let plaintext = &plaintext[..plaintext.len() - usize::from(remainder)];
 
                         // Deserialize and store the decrypted resource
-                        let Ok(resource) = ResourceWithLabel::try_from_slice(&plaintext) else { continue };
+                        let Ok(resource) = ResourceWithLabel::try_from_slice(&plaintext) else {
+                            continue;
+                        };
                         state.note_map.insert(state.current_pos, resource);
                     }
                 }
@@ -844,10 +986,16 @@ impl ClientState {
         for (current_pos, resource) in &state.note_map {
             for fvk in fvks {
                 if resource.resource.nk_commitment == fvk.nullifier_key.commit().0 {
-                    let nullifier_key = NullifierKey { bytes: fvk.nullifier_key.0 };
+                    let nullifier_key = NullifierKey {
+                        bytes: fvk.nullifier_key.0,
+                    };
                     let nullifier = resource.resource.nullifier(nullifier_key);
                     state.nf_map.insert(nullifier, *current_pos);
-                    state.pos_map.entry(fvk.clone()).or_default().insert(*current_pos);
+                    state
+                        .pos_map
+                        .entry(fvk.clone())
+                        .or_default()
+                        .insert(*current_pos);
                     break;
                 }
             }

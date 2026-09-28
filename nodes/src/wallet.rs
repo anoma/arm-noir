@@ -1,37 +1,37 @@
+use crate::EmbeddedCurvePoint;
+use crate::EmbeddedCurveScalar;
 use age::EncryptError;
 use age::scrypt::Identity;
 use age::scrypt::Recipient;
 use age::secrecy::SecretString;
 use alloy::primitives::Address;
 use alloy::primitives::B512;
+use alloy::primitives::keccak256;
 use alloy::signers::k256::ecdsa::SigningKey;
 use alloy::signers::local::PrivateKeySigner;
 use bech32::Hrp;
+use borsh::{BorshDeserialize, BorshSerialize};
+use k256::PublicKey;
+use k256::SecretKey;
+use k256::ecdsa::VerifyingKey;
+use k256::schnorr::CryptoRngCore;
+use nodes::read_bytes;
+use nodes::write_bytes;
+use rand::Rng;
 use serde::Deserializer;
 use serde::Serializer;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use k256::ecdsa::VerifyingKey;
-use k256::PublicKey;
-use k256::SecretKey;
-use k256::schnorr::CryptoRngCore;
-use alloy::primitives::keccak256;
-use rand::Rng;
-use nodes::write_bytes;
-use nodes::read_bytes;
-use borsh::{BorshSerialize, BorshDeserialize};
-use std::hash::Hash;
-use std::hash::Hasher;
-use std::cmp::Ordering;
-use crate::EmbeddedCurvePoint;
-use crate::EmbeddedCurveScalar;
 
 // Ethereum block height
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -45,7 +45,7 @@ pub struct Encrypted<X>(
     #[serde(skip)] PhantomData<X>,
 );
 
-pub trait Bech32 : Sized {
+pub trait Bech32: Sized {
     const HRP: &str;
 
     /// Helper to convert the key to a bech32m string
@@ -152,7 +152,7 @@ impl BorshDeserialize for ExtendedFullViewingKey {
         reader.read_exact(&mut dsk_bytes)?;
         let discovery_secret_key = SecretKey::from_slice(&dsk_bytes)
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-        
+
         // Deserialize NullifierKey
         let nullifier_key = NullifierKey::deserialize_reader(reader)?;
 
@@ -208,17 +208,33 @@ impl Bech32 for PaymentAddress {
     const HRP: &str = "ztestsapling";
 
     fn to_vec(&self) -> std::io::Result<Vec<u8>> {
-        let mut bytes = [0u8; VERIFYING_KEY_LEN + PUBLIC_KEY_LEN + GRUMPKIN_PUBLIC_KEY_LEN + NULLIFIER_KEY_COMMITMENT_LEN];
+        let mut bytes = [0u8; VERIFYING_KEY_LEN
+            + PUBLIC_KEY_LEN
+            + GRUMPKIN_PUBLIC_KEY_LEN
+            + NULLIFIER_KEY_COMMITMENT_LEN];
         let mut offset = 0;
         write_bytes(&mut bytes, &mut offset, &self.verifying_key.to_sec1_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.encryption_public_key.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.discovery_public_key.to_sec1_bytes());
+        write_bytes(
+            &mut bytes,
+            &mut offset,
+            &self.encryption_public_key.to_bytes(),
+        );
+        write_bytes(
+            &mut bytes,
+            &mut offset,
+            &self.discovery_public_key.to_sec1_bytes(),
+        );
         write_bytes(&mut bytes, &mut offset, &self.nullifier_key_commitment.0);
         Ok(bytes.to_vec())
     }
 
     fn from_slice(v: &[u8]) -> std::io::Result<Self> {
-        if v.len() != VERIFYING_KEY_LEN + GRUMPKIN_PUBLIC_KEY_LEN + PUBLIC_KEY_LEN + NULLIFIER_KEY_COMMITMENT_LEN {
+        if v.len()
+            != VERIFYING_KEY_LEN
+                + GRUMPKIN_PUBLIC_KEY_LEN
+                + PUBLIC_KEY_LEN
+                + NULLIFIER_KEY_COMMITMENT_LEN
+        {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
                 "unexpected length for PaymentAddress",
@@ -227,11 +243,18 @@ impl Bech32 for PaymentAddress {
         let mut offset = 0;
         let vk = VerifyingKey::from_sec1_bytes(&read_bytes::<VERIFYING_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
-        let epk = EmbeddedCurvePoint::from_bytes(&read_bytes::<GRUMPKIN_PUBLIC_KEY_LEN>(v, &mut offset));
+        let epk =
+            EmbeddedCurvePoint::from_bytes(&read_bytes::<GRUMPKIN_PUBLIC_KEY_LEN>(v, &mut offset));
         let dpk = PublicKey::from_sec1_bytes(&read_bytes::<PUBLIC_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
-        let nk_commit = NullifierKeyCommitment(read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset));
-        Ok(Self { verifying_key: vk, encryption_public_key: epk, discovery_public_key: dpk, nullifier_key_commitment: nk_commit })
+        let nk_commit =
+            NullifierKeyCommitment(read_bytes::<NULLIFIER_KEY_COMMITMENT_LEN>(v, &mut offset));
+        Ok(Self {
+            verifying_key: vk,
+            encryption_public_key: epk,
+            discovery_public_key: dpk,
+            nullifier_key_commitment: nk_commit,
+        })
     }
 }
 
@@ -250,7 +273,12 @@ impl ExtendedSpendingKey {
         let encryption_secret_key = EmbeddedCurveScalar::random(rng);
         let discovery_secret_key = SecretKey::random(rng);
         let nullifier_key = NullifierKey::random(rng);
-        Self { signing_key, encryption_secret_key, discovery_secret_key, nullifier_key }
+        Self {
+            signing_key,
+            encryption_secret_key,
+            discovery_secret_key,
+            nullifier_key,
+        }
     }
     /// Convert to an extended full viewing key
     pub fn to_viewing_key(&self) -> ExtendedFullViewingKey {
@@ -267,17 +295,27 @@ impl Bech32 for ExtendedSpendingKey {
     const HRP: &str = "secret-extended-key-test";
 
     fn to_vec(&self) -> std::io::Result<Vec<u8>> {
-        let mut bytes = [0u8; SIGNING_KEY_LEN + GRUMPKIN_SECRET_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_LEN];
+        let mut bytes =
+            [0u8; SIGNING_KEY_LEN + GRUMPKIN_SECRET_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_LEN];
         let mut offset = 0;
         write_bytes(&mut bytes, &mut offset, &self.signing_key.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.encryption_secret_key.to_bytes());
-        write_bytes(&mut bytes, &mut offset, &self.discovery_secret_key.to_bytes());
+        write_bytes(
+            &mut bytes,
+            &mut offset,
+            &self.encryption_secret_key.to_bytes(),
+        );
+        write_bytes(
+            &mut bytes,
+            &mut offset,
+            &self.discovery_secret_key.to_bytes(),
+        );
         write_bytes(&mut bytes, &mut offset, &self.nullifier_key.0);
         Ok(bytes.to_vec())
     }
 
     fn from_slice(v: &[u8]) -> std::io::Result<Self> {
-        if v.len() != SIGNING_KEY_LEN + GRUMPKIN_SECRET_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_LEN {
+        if v.len() != SIGNING_KEY_LEN + GRUMPKIN_SECRET_KEY_LEN + SECRET_KEY_LEN + NULLIFIER_KEY_LEN
+        {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
                 "unexpected length for ExtendedSpendingKey",
@@ -286,11 +324,17 @@ impl Bech32 for ExtendedSpendingKey {
         let mut offset = 0;
         let vk = SigningKey::from_slice(&read_bytes::<SIGNING_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
-        let esk = EmbeddedCurveScalar::from_bytes(&read_bytes::<GRUMPKIN_SECRET_KEY_LEN>(v, &mut offset));
+        let esk =
+            EmbeddedCurveScalar::from_bytes(&read_bytes::<GRUMPKIN_SECRET_KEY_LEN>(v, &mut offset));
         let dsk = SecretKey::from_slice(&read_bytes::<SECRET_KEY_LEN>(v, &mut offset))
             .map_err(std::io::Error::other)?;
         let nk = read_bytes::<NULLIFIER_KEY_LEN>(v, &mut offset);
-        Ok(Self { signing_key: vk, encryption_secret_key: esk, discovery_secret_key: dsk, nullifier_key: NullifierKey(nk) })
+        Ok(Self {
+            signing_key: vk,
+            encryption_secret_key: esk,
+            discovery_secret_key: dsk,
+            nullifier_key: NullifierKey(nk),
+        })
     }
 }
 
@@ -421,12 +465,14 @@ impl Store {
         self.remove(&alias);
         // Encrypt and store this spending key
         let recipient = Recipient::new(SecretString::from(passphrase.clone()));
-        let encrypted = age::encrypt(&recipient, &extsk.to_vec()?).map_err(std::io::Error::other)?;
+        let encrypted =
+            age::encrypt(&recipient, &extsk.to_vec()?).map_err(std::io::Error::other)?;
         self.spending_keys
             .insert(alias.clone(), Encrypted(encrypted.to_vec(), PhantomData));
         // Store the full viewing key corresponding to this spending key
         let extfvk = extsk.to_viewing_key();
-        self.viewing_keys.insert(alias.clone(), Bech32Encoded(extfvk.clone()));
+        self.viewing_keys
+            .insert(alias.clone(), Bech32Encoded(extfvk.clone()));
         // Derive the payment address corresponding to this spending key
         let pa = extfvk.to_payment_address();
         self.payment_addrs.insert(alias, Bech32Encoded(pa));
@@ -436,7 +482,8 @@ impl Store {
     // assignments to that alias.
     pub fn store_viewing_key(&mut self, alias: String, key: ExtendedFullViewingKey) {
         self.remove(&alias);
-        self.viewing_keys.insert(alias.clone(), Bech32Encoded(key.clone()));
+        self.viewing_keys
+            .insert(alias.clone(), Bech32Encoded(key.clone()));
         // Derive the payment address corresponding to this spending key
         let pa = key.to_payment_address();
         self.payment_addrs.insert(alias, Bech32Encoded(pa));

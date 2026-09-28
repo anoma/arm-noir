@@ -1,21 +1,21 @@
-use barretenberg_rs::BarretenbergError;
-use barretenberg_rs::Backend;
-use std::collections::BTreeSet;
+use crate::client::Transaction;
+use crate::merkle::ActNode;
 use crate::merkle::CmtNode;
 use crate::merkle::CommitmentTree;
-use crate::types::Nullifier;
-use borsh::{BorshSerialize, BorshDeserialize};
-use crate::client::Transaction;
-use std::collections::BTreeMap;
-use barretenberg_rs::BarretenbergApi;
-use nodes::BarretenbergCircuit;
 use crate::types::MAX_TREE_DEPTH;
+use crate::types::Nullifier;
+use acir::AcirField;
 use acir::FieldElement;
 use alloy::primitives::keccak256;
-use acir::AcirField;
-use crate::merkle::ActNode;
+use barretenberg_rs::Backend;
+use barretenberg_rs::BarretenbergApi;
+use barretenberg_rs::BarretenbergError;
 use barretenberg_rs::GrumpkinPoint;
 use barretenberg_rs::generated_types::CircuitProveResponse;
+use borsh::{BorshDeserialize, BorshSerialize};
+use nodes::BarretenbergCircuit;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[derive(Debug)]
 // Reasons why a transaction might be rejected
@@ -66,7 +66,10 @@ impl ShieldedPool {
 
     // Make the pool support the given logic circuit
     pub fn register_logic(&mut self, logic_circuit: BarretenbergCircuit) {
-        self.logic_circuits.insert(logic_circuit.compute_vk_response.hash.clone(), logic_circuit);
+        self.logic_circuits.insert(
+            logic_circuit.compute_vk_response.hash.clone(),
+            logic_circuit,
+        );
     }
 
     // Stop the pool from supporting the given logic cicuit
@@ -90,7 +93,8 @@ impl ShieldedPool {
             x: tx.compliance_instance.delta.x.to_be_bytes(),
             y: tx.compliance_instance.delta.y.to_be_bytes(),
         };
-        let verified = api.schnorr_verify_signature(&msg.to_be_bytes(), public_key, &signature.0, &signature.1)
+        let verified = api
+            .schnorr_verify_signature(&msg.to_be_bytes(), public_key, &signature.0, &signature.1)
             .expect("unable to verify transaction signature");
         println!("Signature verification response: {:?}", verified);
         if !verified.verified {
@@ -99,10 +103,14 @@ impl ShieldedPool {
         // Compute the expected action tree root
         let mut tags = vec![];
         for i in 0..tx.compliance_instance.consumed_count {
-            tags.push(ActNode(tx.compliance_instance.consumed_publics[i as usize].resource_nullifier));
+            tags.push(ActNode(
+                tx.compliance_instance.consumed_publics[i as usize].resource_nullifier,
+            ));
         }
         for i in 0..tx.compliance_instance.created_count {
-            tags.push(ActNode(tx.compliance_instance.created_publics[i as usize].resource_commitment));
+            tags.push(ActNode(
+                tx.compliance_instance.created_publics[i as usize].resource_commitment,
+            ));
         }
         let action_tree_depth = if tags.len() == 1 {
             0
@@ -114,7 +122,7 @@ impl ShieldedPool {
         for (logic_instance, _proof) in &tx.logic_instances {
             if tags.contains(&ActNode(logic_instance.tag)) {
                 if logic_instance.action_root != action_root.0 {
-                    return Err(ShieldedPoolError::InvalidActionTreeRoot)
+                    return Err(ShieldedPoolError::InvalidActionTreeRoot);
                 }
             }
         }
@@ -127,7 +135,10 @@ impl ShieldedPool {
         let compliance_verify_response = compliance_circuit
             .circuit_verify(api, compliance_prove_response.clone())
             .map_err(ShieldedPoolError::BarretenbergError)?;
-        println!("Compliance proof verification response: {:?}", compliance_verify_response);
+        println!(
+            "Compliance proof verification response: {:?}",
+            compliance_verify_response
+        );
         if !compliance_verify_response.verified {
             return Err(ShieldedPoolError::ComplianceProof);
         }
@@ -138,10 +149,16 @@ impl ShieldedPool {
             let consumed_public = tx.compliance_instance.consumed_publics[i as usize];
             if nullifiers.contains_key(&consumed_public.resource_nullifier) {
                 return Err(ShieldedPoolError::DuplicateNullifier);
-            } else if !self.anchors.contains(&CmtNode::new(consumed_public.commitment_tree_root)) {
+            } else if !self
+                .anchors
+                .contains(&CmtNode::new(consumed_public.commitment_tree_root))
+            {
                 return Err(ShieldedPoolError::NonExistentAnchor);
             } else {
-                nullifiers.insert(consumed_public.resource_nullifier, consumed_public.resource_logic_ref);
+                nullifiers.insert(
+                    consumed_public.resource_nullifier,
+                    consumed_public.resource_logic_ref,
+                );
             }
         }
         // Track the commitments encountered
@@ -150,7 +167,10 @@ impl ShieldedPool {
             if commitments.contains_key(&created_public.resource_commitment) {
                 return Err(ShieldedPoolError::DuplicateCommitment);
             } else {
-                commitments.insert(created_public.resource_commitment, created_public.resource_logic_ref);
+                commitments.insert(
+                    created_public.resource_commitment,
+                    created_public.resource_logic_ref,
+                );
             }
         }
         // Check all the logic proofs
@@ -159,14 +179,18 @@ impl ShieldedPool {
             let logic_circuit = if logic_instance.is_consumed {
                 // Cross-check the nullifiers
                 if let Some(hash) = nullifiers.remove(&logic_instance.tag) {
-                    self.logic_circuits.get_mut(&hash.to_vec()).ok_or(ShieldedPoolError::CircuitNotRegistered)?
+                    self.logic_circuits
+                        .get_mut(&hash.to_vec())
+                        .ok_or(ShieldedPoolError::CircuitNotRegistered)?
                 } else {
                     return Err(ShieldedPoolError::UnpairedNullifier);
                 }
             } else {
                 // Cross-check the commitments
                 if let Some(hash) = commitments.remove(&logic_instance.tag) {
-                    self.logic_circuits.get_mut(&hash.to_vec()).ok_or(ShieldedPoolError::CircuitNotRegistered)?
+                    self.logic_circuits
+                        .get_mut(&hash.to_vec())
+                        .ok_or(ShieldedPoolError::CircuitNotRegistered)?
                 } else {
                     return Err(ShieldedPoolError::UnpairedCommitment);
                 }
@@ -206,7 +230,8 @@ impl ShieldedPool {
             }
         }
         // Compute the new Merkle root
-        self.anchors.insert(CommitmentTree::new(api, MAX_TREE_DEPTH, &self.commitments).root(api));
+        self.anchors
+            .insert(CommitmentTree::new(api, MAX_TREE_DEPTH, &self.commitments).root(api));
         // Record the transaction
         self.transactions.push(tx);
         Ok(())

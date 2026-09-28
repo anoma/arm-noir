@@ -3,6 +3,7 @@ use acir::FieldElement;
 use barretenberg_rs::BarretenbergApi;
 use barretenberg_rs::backends::FfiBackend;
 use borsh::{BorshDeserialize, BorshSerialize};
+use nodes::BarretenbergCircuit;
 use noirc_abi::InputMap;
 use noirc_abi::input_parser::InputValue;
 use sha2::{Digest, Sha256};
@@ -22,7 +23,6 @@ use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use nodes::BarretenbergCircuit;
 
 /// Path to file containing the aggregation circuit
 const AGGREGATION_CIRCUIT_PATH: &str = "../circuits/target/recursive_no_zk_aggregation.json";
@@ -860,8 +860,14 @@ impl<AggregatorIds: Iterator, BatchIds: Iterator> BarretenbergAggregator<BatchId
             .collect();
         assert!(right.is_empty(), "right map has keys not in the left map");
         // Compute the proof from the witness bytes
-        let prove_response = self.circuit.circuit_prove(&mut self.api, input_map).unwrap();
-        let verify_response = self.circuit.circuit_verify(&mut self.api, prove_response.clone()).unwrap();
+        let prove_response = self
+            .circuit
+            .circuit_prove(&mut self.api, input_map)
+            .unwrap();
+        let verify_response = self
+            .circuit
+            .circuit_verify(&mut self.api, prove_response.clone())
+            .unwrap();
         println!("Verification response: {:?}", verify_response);
         // Finally, make an output map representing the combined proofs
         VerifierInputs {
@@ -1356,14 +1362,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use std::time::Duration;
-    use crate::aggregator::TcpStreamAggregator;
     use crate::aggregator::MerkleAggregator;
-    use std::thread;
-    use std::sync::mpsc;
-    use std::ops::RangeFrom;
+    use crate::aggregator::TcpStreamAggregator;
     use nodes::init_srs;
+    use proptest::prelude::*;
+    use std::ops::RangeFrom;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     // A ZK proof to use for testing
     fn noir_recursive_no_zk_proof() -> VerifierInputs {

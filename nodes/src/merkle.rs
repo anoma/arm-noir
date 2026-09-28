@@ -1,38 +1,32 @@
 //! Implementation of a Merkle tree of commitments used to prove the existence of notes.
 
+use crate::DIGEST_BYTES;
+use acir::AcirField;
+use acir::FieldElement;
+use alloy::primitives::keccak256;
+use barretenberg_rs::Backend;
+use barretenberg_rs::BarretenbergApi;
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::io::{self, Read, Write};
-use barretenberg_rs::BarretenbergApi;
-use barretenberg_rs::Backend;
-use crate::DIGEST_BYTES;
-use acir::FieldElement;
-use acir::AcirField;
-use alloy::primitives::keccak256;
 
 /// A constant padding leaf used in Merkle trees.
 /// This was computed from sha256("EMPTY")
 pub const PADDING_LEAF: [u8; DIGEST_BYTES] = [
-    0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a,
-    0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
-    0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56,
-    0x63, 0x3e, 0xf8, 0xc6, 0x0f, 0xab, 0x7b, 0x06
+    0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a, 0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
+    0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56, 0x63, 0x3e, 0xf8, 0xc6, 0x0f, 0xab, 0x7b, 0x06,
 ];
 /// The above constant as a commitment tree node.
 /// Note that nodes internally represent numbers
 /// in big-endian byte order.
 pub const PADDING_LEAF_CMT_NODE: CmtNode = CmtNode([
-    0x06, 0x7b, 0xab, 0x0f, 0xc6, 0xf8, 0x3e, 0x63,
-    0x56, 0xc0, 0x4f, 0x06, 0x5e, 0xaa, 0xe7, 0x40,
-    0x1f, 0x87, 0x8a, 0xee, 0xf9, 0x1d, 0x43, 0xec,
-    0x7a, 0xdb, 0x45, 0x84, 0x83, 0x2f, 0x1d, 0xcc
+    0x06, 0x7b, 0xab, 0x0f, 0xc6, 0xf8, 0x3e, 0x63, 0x56, 0xc0, 0x4f, 0x06, 0x5e, 0xaa, 0xe7, 0x40,
+    0x1f, 0x87, 0x8a, 0xee, 0xf9, 0x1d, 0x43, 0xec, 0x7a, 0xdb, 0x45, 0x84, 0x83, 0x2f, 0x1d, 0xcc,
 ]);
 /// A constant padding leaf used in Merkle trees.
 /// This was computed from sha256("EMPTY")
 pub const PADDING_LEAF_ACT_NODE: ActNode = ActNode([
-    0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a,
-    0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
-    0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56,
-    0x63, 0x3e, 0xf8, 0xc6, 0x0f, 0xab, 0x7b, 0x06
+    0xcc, 0x1d, 0x2f, 0x83, 0x84, 0x45, 0xdb, 0x7a, 0xec, 0x43, 0x1d, 0xf9, 0xee, 0x8a, 0x87, 0x1f,
+    0x40, 0xe7, 0xaa, 0x5e, 0x06, 0x4f, 0xc0, 0x56, 0x63, 0x3e, 0xf8, 0xc6, 0x0f, 0xab, 0x7b, 0x06,
 ]);
 
 /// A path from a position in a particular commitment tree to the root of that tree.
@@ -55,7 +49,9 @@ pub trait Hashable<Ctx>: Clone + Copy {
 }
 
 /// A node within the Sapling commitment tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default, Ord, PartialOrd,
+)]
 #[repr(transparent)]
 pub struct CmtNode([u8; 32]);
 
@@ -106,7 +102,7 @@ impl<B: Backend> Hashable<BarretenbergApi<B>> for CmtNode {
             cache.push(<Self as Hashable<BarretenbergApi<B>>>::empty_leaf());
         }
         // Expand the cache enough
-        for i in cache.len()-1..level {
+        for i in cache.len() - 1..level {
             let next = Self::combine(api, i, &cache[i], &cache[i]);
             cache.push(next);
         }
@@ -116,7 +112,9 @@ impl<B: Backend> Hashable<BarretenbergApi<B>> for CmtNode {
 }
 
 /// A node within an action tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Default, Ord, PartialOrd,
+)]
 #[repr(transparent)]
 pub struct ActNode(pub [u8; DIGEST_BYTES]);
 
@@ -127,7 +125,7 @@ impl<B> Hashable<B> for ActNode {
 
     fn combine(api: &mut B, _level: usize, lhs: &Self, rhs: &Self) -> Self {
         // Compute the label reference
-        let mut node_preimage = [0u8; 2*DIGEST_BYTES];
+        let mut node_preimage = [0u8; 2 * DIGEST_BYTES];
         node_preimage[..DIGEST_BYTES].copy_from_slice(lhs.0.as_slice());
         node_preimage[DIGEST_BYTES..].copy_from_slice(rhs.0.as_slice());
         Self(*keccak256(node_preimage))
@@ -139,7 +137,7 @@ impl<B> Hashable<B> for ActNode {
             cache.push(<Self as Hashable<B>>::empty_leaf());
         }
         // Expand the cache enough
-        for i in cache.len()-1..level {
+        for i in cache.len() - 1..level {
             let next = Self::combine(api, i, &cache[i], &cache[i]);
             cache.push(next);
         }
@@ -163,7 +161,10 @@ pub struct CommitmentTree<Node> {
 
 impl<Node: Clone> CommitmentTree<Node> {
     /// Construct a commitment tree with the given leaf nodes
-    pub fn new<T>(api: &mut T, depth: usize, leafs: &[Node]) -> Self where Node: Hashable<T> {
+    pub fn new<T>(api: &mut T, depth: usize, leafs: &[Node]) -> Self
+    where
+        Node: Hashable<T>,
+    {
         // This capacity is sufficient to hold a Merkle tree (where an empty node
         // is added onto some rows to ensure that they are of even size) with the
         // given number of leaves. This follows from the identity ceil(ceil(x/m)/n)=ceil(x/(mn))
@@ -175,9 +176,17 @@ impl<Node: Clone> CommitmentTree<Node> {
     /// Merge the n-1 full Merkle trees with the last possibly unfilled one. All
     /// full trees must have the same size which must be a power of 2 and the
     /// tree must be smaller than this size.
-    pub fn merge<T>(api: &mut T, tree_depth: usize, subtrees: &[CommitmentTree<Node>]) -> Self where Node: Hashable<T> {
+    pub fn merge<T>(api: &mut T, tree_depth: usize, subtrees: &[CommitmentTree<Node>]) -> Self
+    where
+        Node: Hashable<T>,
+    {
         if subtrees.is_empty() {
-            return Self { nodes: Vec::new(), leaf_count: 0, cache: Vec::new(), depth: tree_depth };
+            return Self {
+                nodes: Vec::new(),
+                leaf_count: 0,
+                cache: Vec::new(),
+                depth: tree_depth,
+            };
         } else if subtrees.len() == 1 {
             return subtrees[0].clone();
         }
@@ -209,7 +218,8 @@ impl<Node: Clone> CommitmentTree<Node> {
                 );
             }
             tree.extend_from_slice(
-                &subtrees.last().unwrap().nodes[prev_last_start..(prev_last_start + prev_last_width)],
+                &subtrees.last().unwrap().nodes
+                    [prev_last_start..(prev_last_start + prev_last_width)],
             );
             // Quit when we are the top of the full trees
             if prev_first_width == 1 {
@@ -237,7 +247,10 @@ impl<Node: Clone> CommitmentTree<Node> {
         mut prev_width: usize,
         heightp: usize,
         leafs: usize,
-    ) -> Self where Node: Hashable<T> {
+    ) -> Self
+    where
+        Node: Hashable<T>,
+    {
         // A cache for empty roots
         let mut cache = Vec::new();
         // Add higher and higher rows of the Merkle tree
@@ -261,21 +274,28 @@ impl<Node: Clone> CommitmentTree<Node> {
             prev_start += prev_width;
             prev_width /= 2;
         }
-        Self { nodes: tree, leaf_count: leafs, cache, depth: tree_depth }
+        Self {
+            nodes: tree,
+            leaf_count: leafs,
+            cache,
+            depth: tree_depth,
+        }
     }
     /// Get the root node of the commitment tree
-    pub fn root<T>(&mut self, api: &mut T) -> Node where Node: Hashable<T> {
+    pub fn root<T>(&mut self, api: &mut T) -> Node
+    where
+        Node: Hashable<T>,
+    {
         self.nodes
             .last()
             .cloned()
             .unwrap_or_else(|| Node::empty_root(api, &mut self.cache, self.depth))
     }
     /// Construct a merkle path to the given position in commitment tree
-    pub fn path<T>(
-        &mut self,
-        api: &mut T,
-        mut pos: usize,
-    ) -> MerklePath<Node> where Node: Hashable<T> {
+    pub fn path<T>(&mut self, api: &mut T, mut pos: usize) -> MerklePath<Node>
+    where
+        Node: Hashable<T>,
+    {
         let mut path = MerklePath {
             auth_path: vec![],
             position: pos as u64,
@@ -328,6 +348,11 @@ impl<Node: BorshSerialize> BorshSerialize for CommitmentTree<Node> {
 impl<Node: BorshDeserialize> BorshDeserialize for CommitmentTree<Node> {
     fn deserialize_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
         let tup: (usize, usize, Vec<Node>) = BorshDeserialize::deserialize_reader(reader)?;
-        Ok(Self { nodes: tup.2, leaf_count: tup.1, depth: tup.0, cache: Default::default() })
+        Ok(Self {
+            nodes: tup.2,
+            leaf_count: tup.1,
+            depth: tup.0,
+            cache: Default::default(),
+        })
     }
 }

@@ -1,29 +1,29 @@
-use noirc_abi::InputMap;
-use noirc_abi::input_parser::InputValue;
-use acir::FieldElement;
-use serde::{Deserialize, Serialize};
-use nodes::write_bytes;
-use rand::Rng;
-use ark_bn254::Fq;
-use ark_ff::UniformRand;
-use ark_ff::PrimeField;
-use alloy::primitives::keccak256;
-use sha2::{Sha256, Digest};
-use borsh::{BorshSerialize, BorshDeserialize};
 use acir::AcirField;
-use barretenberg_rs::BarretenbergApi;
-use barretenberg_rs::Backend;
+use acir::FieldElement;
+use alloy::primitives::keccak256;
+use ark_bn254::Fq;
 use ark_ec::AffineRepr;
-use std::ops::Neg;
-use ark_ff::BigInteger;
-use std::ops::Mul;
 use ark_ec::CurveGroup;
+use ark_ff::BigInteger;
+use ark_ff::PrimeField;
+use ark_ff::UniformRand;
+use barretenberg_rs::Backend;
+use barretenberg_rs::BarretenbergApi;
+use borsh::{BorshDeserialize, BorshSerialize};
 use k256::AffinePoint;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use nodes::read_bytes;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
-use std::io::Write;
+use nodes::write_bytes;
+use noirc_abi::InputMap;
+use noirc_abi::input_parser::InputValue;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io::Read;
+use std::io::Write;
+use std::ops::Mul;
+use std::ops::Neg;
 
 /// Path to file containing the aggregation circuit
 pub const TRANSFER_AUTH_CIRCUIT_PATH: &str = "../circuits/target/transfer_auth.json";
@@ -66,31 +66,45 @@ const CONSUMED_COUNT_BYTES: usize = 4;
 const CREATED_COUNT_BYTES: usize = 4;
 const BASE_FIELD_BYTES: usize = 32;
 const QUANTITY_BYTES: usize = 16;
-const RESOURCE_BYTES: usize = 6*DIGEST_BYTES + QUANTITY_BYTES + 1;
+const RESOURCE_BYTES: usize = 6 * DIGEST_BYTES + QUANTITY_BYTES + 1;
 const RCM_BYTES: usize = PRF_EXPAND_PERSONALIZATION_LEN + 1 + 2 * DIGEST_BYTES;
 const PRF_EXPAND_RCM: u8 = 1;
 const PRF_EXPAND_PERSONALIZATION: [u8; PRF_EXPAND_PERSONALIZATION_LEN] = *b"RISC0_ExpandSeed";
 const PSI_BYTES: usize = PRF_EXPAND_PERSONALIZATION_LEN + 1 + 2 * DIGEST_BYTES;
 const PRF_EXPAND_PSI: u8 = 0;
 const NONCE_DERIVATION_PERSONALIZATION_LEN: usize = 20;
-const NONCE_DERIVATION_PERSONALIZATION: [u8; NONCE_DERIVATION_PERSONALIZATION_LEN] = *b"ARM_NONCE_DERIVATION";
+const NONCE_DERIVATION_PERSONALIZATION: [u8; NONCE_DERIVATION_PERSONALIZATION_LEN] =
+    *b"ARM_NONCE_DERIVATION";
 const NONCE_INDEX_BYTES: usize = 4;
-const NONCE_PREIMAGE_LEN: usize = NONCE_DERIVATION_PERSONALIZATION_LEN + NONCE_INDEX_BYTES + DIGEST_BYTES;
+const NONCE_PREIMAGE_LEN: usize =
+    NONCE_DERIVATION_PERSONALIZATION_LEN + NONCE_INDEX_BYTES + DIGEST_BYTES;
 const PAYLOAD_LEN_BYTES: usize = 4;
 const BLOB_LEN_BYTES: u32 = 4;
-const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3*DIGEST_BYTES*MAX_CONSUMED + 2*DIGEST_BYTES*MAX_CREATED + CONSUMED_COUNT_BYTES + CREATED_COUNT_BYTES + 2*BASE_FIELD_BYTES;
+const MAX_COMPLIANCE_DIGEST_BUF_LEN: usize = 3 * DIGEST_BYTES * MAX_CONSUMED
+    + 2 * DIGEST_BYTES * MAX_CREATED
+    + CONSUMED_COUNT_BYTES
+    + CREATED_COUNT_BYTES
+    + 2 * BASE_FIELD_BYTES;
 pub const ENCRYPTION_NONCE_LEN: usize = 12;
 pub const DISCOVERY_NONCE_LEN: usize = 12;
-const RESOURCE_WITH_LABEL_BYTES: usize = RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
+const RESOURCE_WITH_LABEL_BYTES: usize =
+    RESOURCE_BYTES + MAX_FORWARDER_ADDR_LEN + MAX_ERC20_TOKEN_ADDR_LEN;
 pub const FORWARDER_ADDR_LEN: usize = 20;
 pub const ERC20_TOKEN_ADDR_LEN: usize = 20;
 pub const MAX_UNTAGGED_ENCRYPTION_PK_LEN: usize = 64;
 pub const AES_KEY_LEN: usize = 16;
 
 /// Construct input value from Option type
-fn option_to_input_value<T>(opt: Option<T>) -> InputValue where InputValue: From<T>, T: Default {
+fn option_to_input_value<T>(opt: Option<T>) -> InputValue
+where
+    InputValue: From<T>,
+    T: Default,
+{
     let mut map = InputMap::new();
-    map.insert("_is_some".to_string(), InputValue::Field(FieldElement::from(opt.is_some())));
+    map.insert(
+        "_is_some".to_string(),
+        InputValue::Field(FieldElement::from(opt.is_some())),
+    );
     map.insert("_value".to_string(), opt.unwrap_or_default().into());
     InputValue::Struct(map)
 }
@@ -132,7 +146,9 @@ pub struct Ciphertext<const CIPHERTEXT_LEN: usize, AffinePoint> {
 impl Ciphertext<DISCOVERY_CIPHERTEXT_LEN, k256::AffinePoint> {
     /// Serializes the Ciphertext into a fixed-length byte array of size `N`.
     /// The layout is: Nonce (12 bytes) | PK (65 bytes) | Cipher Data | Zero Padding
-    pub fn to_bytes(&self) -> [u8; DISCOVERY_CIPHERTEXT_LEN + DISCOVERY_NONCE_LEN + DISCOVERY_PK_LEN] {
+    pub fn to_bytes(
+        &self,
+    ) -> [u8; DISCOVERY_CIPHERTEXT_LEN + DISCOVERY_NONCE_LEN + DISCOVERY_PK_LEN] {
         let mut bytes = [0u8; _];
         let mut offset: usize = 0;
         // 1. Write nonce (12 bytes)
@@ -156,14 +172,16 @@ impl Ciphertext<DISCOVERY_CIPHERTEXT_LEN, k256::AffinePoint> {
         let pk = Option::from(AffinePoint::from_encoded_point(&encoded_point))?;
         // 3. Read cipher data
         let cipher = read_bytes(bytes, &mut offset);
-        Some(Self {cipher, nonce, pk })
+        Some(Self { cipher, nonce, pk })
     }
 }
 
 impl Ciphertext<ENCRYPTION_CIPHERTEXT_LEN, EmbeddedCurvePoint> {
     /// Serializes the Ciphertext into a fixed-length byte array of size `N`.
     /// The layout is: Nonce (12 bytes) | PK (65 bytes) | Cipher Data | Zero Padding
-    pub fn to_bytes(&self) -> [u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_TAGGED_ENCRYPTION_PK_LEN] {
+    pub fn to_bytes(
+        &self,
+    ) -> [u8; ENCRYPTION_CIPHERTEXT_LEN + ENCRYPTION_NONCE_LEN + MAX_TAGGED_ENCRYPTION_PK_LEN] {
         let mut bytes = [0u8; _];
         let mut offset: usize = 0;
         // 1. Write nonce (12 bytes)
@@ -186,12 +204,14 @@ impl Ciphertext<ENCRYPTION_CIPHERTEXT_LEN, EmbeddedCurvePoint> {
         if read_bytes(bytes, &mut offset) != [0x04; 1] {
             return None;
         }
-        let x = FieldElement::from_be_bytes_reduce(&read_bytes::<BASE_FIELD_BYTES>(bytes, &mut offset));
-        let y = FieldElement::from_be_bytes_reduce(&read_bytes::<BASE_FIELD_BYTES>(bytes, &mut offset));
+        let x =
+            FieldElement::from_be_bytes_reduce(&read_bytes::<BASE_FIELD_BYTES>(bytes, &mut offset));
+        let y =
+            FieldElement::from_be_bytes_reduce(&read_bytes::<BASE_FIELD_BYTES>(bytes, &mut offset));
         let pk = EmbeddedCurvePoint { x, y };
         // 3. Read cipher data
         let cipher = read_bytes(bytes, &mut offset);
-        Some(Self {cipher, nonce, pk })
+        Some(Self { cipher, nonce, pk })
     }
 }
 
@@ -226,8 +246,14 @@ impl From<Resource> for InputValue {
         map.insert("nonce".to_string(), Array(res.nonce).into());
         map.insert("nk_commitment".to_string(), Array(res.nk_commitment).into());
         map.insert("rand_seed".to_string(), Array(res.rand_seed).into());
-        map.insert("is_ephemeral".to_string(), InputValue::Field(FieldElement::from(res.is_ephemeral)));
-        map.insert("quantity".to_string(), InputValue::Field(FieldElement::from(res.quantity)));
+        map.insert(
+            "is_ephemeral".to_string(),
+            InputValue::Field(FieldElement::from(res.is_ephemeral)),
+        );
+        map.insert(
+            "quantity".to_string(),
+            InputValue::Field(FieldElement::from(res.quantity)),
+        );
         InputValue::Struct(map)
     }
 }
@@ -248,9 +274,9 @@ impl Resource {
         assert_eq!(offset, PSI_BYTES, "resource psi pre-image malformed");
         keccak256(bytes).0
     }
-    
+
     /// Compute the randomness to commit the resource
-    pub fn rcm(self) -> [u8; DIGEST_BYTES]  {
+    pub fn rcm(self) -> [u8; DIGEST_BYTES] {
         let mut bytes = [0u8; RCM_BYTES];
         let mut offset: usize = 0;
         // Write the PRF_EXPAND_PERSONALIZATION
@@ -264,7 +290,7 @@ impl Resource {
         assert_eq!(offset, RCM_BYTES, "resource rcm pre-image malformed");
         keccak256(bytes).0
     }
-    
+
     fn commitment_preimage(self) -> [u8; RESOURCE_BYTES] {
         // Concatenate all the components of this resource
         let mut bytes = [0; RESOURCE_BYTES];
@@ -287,7 +313,10 @@ impl Resource {
         write_bytes(&mut bytes, &mut offset, &rcm);
         // Write the ephemeral flag
         write_bytes(&mut bytes, &mut offset, &[self.is_ephemeral as u8]);
-        assert_eq!(offset, RESOURCE_BYTES, "resource commitment pre-image malformed");
+        assert_eq!(
+            offset, RESOURCE_BYTES,
+            "resource commitment pre-image malformed"
+        );
         bytes
     }
 
@@ -306,7 +335,10 @@ impl Resource {
     /// Compute the nullifier of the resource from its commitment
     pub fn nullifier_from_commitment(self, nk: NullifierKey, cm: [u8; DIGEST_BYTES]) -> Nullifier {
         // Make sure that the nullifier public key corresponds to the secret key
-        assert_eq!(self.nk_commitment, crate::wallet::NullifierKey(nk.bytes).commit().0);
+        assert_eq!(
+            self.nk_commitment,
+            crate::wallet::NullifierKey(nk.bytes).commit().0
+        );
         let mut bytes = [0u8; 4 * DIGEST_BYTES];
         let mut offset: usize = 0;
         // Write the resource commitment
@@ -336,7 +368,10 @@ impl Resource {
 
     /// Hashes the concatenation of the passed nullifier digests.
     /// Fails if `nullifiers` is empty.
-    pub fn hash_nullifiers(nullifiers: [Nullifier; MAX_CONSUMED], count: usize) -> [u8; DIGEST_BYTES] {
+    pub fn hash_nullifiers(
+        nullifiers: [Nullifier; MAX_CONSUMED],
+        count: usize,
+    ) -> [u8; DIGEST_BYTES] {
         assert!(count > 0);
         assert!(count <= MAX_CONSUMED);
         let mut hash_input = [0u8; MAX_CONSUMED * DIGEST_BYTES];
@@ -346,7 +381,11 @@ impl Resource {
                 write_bytes(&mut hash_input, &mut offset, &nullifiers[i]);
             }
         }
-        assert_eq!(offset, count * DIGEST_BYTES, "nullifier concatenation malformed");
+        assert_eq!(
+            offset,
+            count * DIGEST_BYTES,
+            "nullifier concatenation malformed"
+        );
         Sha256::digest(&hash_input[..offset]).into()
     }
 
@@ -356,10 +395,16 @@ impl Resource {
         let logic_ref = FieldElement::from_le_bytes_reduce(&self.logic_ref);
         let label_ref = FieldElement::from_le_bytes_reduce(&self.label_ref);
         // Hash to a curve point
-        let point = api.pedersen_commit(vec![
-            logic_ref.to_be_bytes().to_vec(),
-            label_ref.to_be_bytes().to_vec(),
-        ], 0).expect("unable to compute Pedersen commitment").point;
+        let point = api
+            .pedersen_commit(
+                vec![
+                    logic_ref.to_be_bytes().to_vec(),
+                    label_ref.to_be_bytes().to_vec(),
+                ],
+                0,
+            )
+            .expect("unable to compute Pedersen commitment")
+            .point;
         // Convert back to the EmbeddedCurvePoint type
         EmbeddedCurvePoint {
             x: FieldElement::from_be_bytes_reduce(&point.x),
@@ -434,8 +479,14 @@ impl From<LabelInfo> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: LabelInfo) -> Self {
         let mut map = InputMap::new();
-        map.insert("forwarder_addr".to_string(), Array(res.forwarder_addr).into());
-        map.insert("erc20_token_addr".to_string(), Array(res.erc20_token_addr).into());
+        map.insert(
+            "forwarder_addr".to_string(),
+            Array(res.forwarder_addr).into(),
+        );
+        map.insert(
+            "erc20_token_addr".to_string(),
+            Array(res.erc20_token_addr).into(),
+        );
         InputValue::Struct(map)
     }
 }
@@ -467,7 +518,10 @@ impl From<PermitInfo> for InputValue {
     fn from(res: PermitInfo) -> Self {
         let mut map = InputMap::new();
         map.insert("permit_nonce".to_string(), Array(res.permit_nonce).into());
-        map.insert("permit_deadline".to_string(), Array(res.permit_deadline).into());
+        map.insert(
+            "permit_deadline".to_string(),
+            Array(res.permit_deadline).into(),
+        );
         map.insert("permit_sig".to_string(), Array(res.permit_sig).into());
         InputValue::Struct(map)
     }
@@ -488,8 +542,14 @@ impl From<ForwarderInfo> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: ForwarderInfo) -> Self {
         let mut map = InputMap::new();
-        map.insert("ethereum_account_addr".to_string(), Array(res.ethereum_account_addr).into());
-        map.insert("call_type".to_string(), InputValue::Field(FieldElement::from(res.call_type)));
+        map.insert(
+            "ethereum_account_addr".to_string(),
+            Array(res.ethereum_account_addr).into(),
+        );
+        map.insert(
+            "call_type".to_string(),
+            InputValue::Field(FieldElement::from(res.call_type)),
+        );
         map.insert("permit".to_string(), option_to_input_value(res.permit));
         InputValue::Struct(map)
     }
@@ -524,14 +584,35 @@ impl From<TransferAuthWitness> for InputValue {
     fn from(res: TransferAuthWitness) -> Self {
         let mut map = InputMap::new();
         map.insert("resource".to_string(), res.resource.into());
-        map.insert("is_consumed".to_string(), InputValue::Field(FieldElement::from(res.is_consumed)));
+        map.insert(
+            "is_consumed".to_string(),
+            InputValue::Field(FieldElement::from(res.is_consumed)),
+        );
         map.insert("action_root".to_string(), Array(res.action_root).into());
-        map.insert("auth_sig".to_string(), option_to_input_value(res.auth_sig.map(Array)));
-        map.insert("nullifier_key".to_string(), option_to_input_value(res.nullifier_key));
-        map.insert("value_info".to_string(), option_to_input_value(res.value_info));
-        map.insert("encryption_info".to_string(), option_to_input_value(res.encryption_info));
-        map.insert("label_info".to_string(), option_to_input_value(res.label_info));
-        map.insert("forwarder_info".to_string(), option_to_input_value(res.forwarder_info));
+        map.insert(
+            "auth_sig".to_string(),
+            option_to_input_value(res.auth_sig.map(Array)),
+        );
+        map.insert(
+            "nullifier_key".to_string(),
+            option_to_input_value(res.nullifier_key),
+        );
+        map.insert(
+            "value_info".to_string(),
+            option_to_input_value(res.value_info),
+        );
+        map.insert(
+            "encryption_info".to_string(),
+            option_to_input_value(res.encryption_info),
+        );
+        map.insert(
+            "label_info".to_string(),
+            option_to_input_value(res.label_info),
+        );
+        map.insert(
+            "forwarder_info".to_string(),
+            option_to_input_value(res.forwarder_info),
+        );
         InputValue::Struct(map)
     }
 }
@@ -565,9 +646,18 @@ impl From<EncryptionInfo> for InputValue {
     fn from(res: EncryptionInfo) -> Self {
         let mut map = InputMap::new();
         map.insert("sender_sk".to_string(), res.sender_sk.into());
-        map.insert("encryption_nonce".to_string(), Array(res.encryption_nonce).into());
-        map.insert("discovery_ciphertext_len".to_string(), InputValue::Field(FieldElement::from(res.discovery_ciphertext_len)));
-        map.insert("discovery_ciphertext".to_string(), Array(res.discovery_ciphertext).into());
+        map.insert(
+            "encryption_nonce".to_string(),
+            Array(res.encryption_nonce).into(),
+        );
+        map.insert(
+            "discovery_ciphertext_len".to_string(),
+            InputValue::Field(FieldElement::from(res.discovery_ciphertext_len)),
+        );
+        map.insert(
+            "discovery_ciphertext".to_string(),
+            Array(res.discovery_ciphertext).into(),
+        );
         InputValue::Struct(map)
     }
 }
@@ -581,7 +671,11 @@ pub struct MerklePath {
 
 impl MerklePath {
     /// Returns the root of the tree corresponding to this path applied to `leaf`.
-    pub fn root<B: Backend>(&self, api: &mut BarretenbergApi<B>, leaf: [u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
+    pub fn root<B: Backend>(
+        &self,
+        api: &mut BarretenbergApi<B>,
+        leaf: [u8; DIGEST_BYTES],
+    ) -> [u8; DIGEST_BYTES] {
         let current_root = FieldElement::from_le_bytes_reduce(&leaf);
         let mut current_root = current_root.to_be_bytes();
         for i in 0..MAX_TREE_DEPTH {
@@ -591,7 +685,9 @@ impl MerklePath {
                     api.poseidon2_hash(vec![sibling.to_be_bytes(), current_root])
                 } else {
                     api.poseidon2_hash(vec![current_root, sibling.to_be_bytes()])
-                }.expect("unable to compute Poseidon hash").hash;
+                }
+                .expect("unable to compute Poseidon hash")
+                .hash;
             }
         }
         let mut current_root_bytes = [0u8; DIGEST_BYTES];
@@ -624,12 +720,17 @@ impl From<MerklePath> for InputValue {
     fn from(res: MerklePath) -> Self {
         let mut map = InputMap::new();
         map.insert("depth".to_string(), InputValue::Field(res.depth.into()));
-        map.insert("path".to_string(), InputValue::Vec(
-            res.path.into_iter().map(|(x, y)| InputValue::Vec(vec![
-                InputValue::Field(x),
-                InputValue::Field(y.into()),
-            ])).collect()
-        ));
+        map.insert(
+            "path".to_string(),
+            InputValue::Vec(
+                res.path
+                    .into_iter()
+                    .map(|(x, y)| {
+                        InputValue::Vec(vec![InputValue::Field(x), InputValue::Field(y.into())])
+                    })
+                    .collect(),
+            ),
+        );
         InputValue::Struct(map)
     }
 }
@@ -657,7 +758,19 @@ impl From<ConsumedResourceWitness> for InputValue {
 }
 
 /// Public information of consumed resources.
-#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Default,
+    Debug,
+    Ord,
+    PartialOrd,
+    Eq,
+    PartialEq,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct ConsumedResourcePublic {
     /// The nullifier of the consumed [Resource].
     pub resource_nullifier: [u8; DIGEST_BYTES],
@@ -671,15 +784,36 @@ impl From<ConsumedResourcePublic> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: ConsumedResourcePublic) -> Self {
         let mut map = InputMap::new();
-        map.insert("resource_nullifier".to_string(), Array(res.resource_nullifier).into());
-        map.insert("resource_logic_ref".to_string(), Array(res.resource_logic_ref).into());
-        map.insert("commitment_tree_root".to_string(), Array(res.commitment_tree_root).into());
+        map.insert(
+            "resource_nullifier".to_string(),
+            Array(res.resource_nullifier).into(),
+        );
+        map.insert(
+            "resource_logic_ref".to_string(),
+            Array(res.resource_logic_ref).into(),
+        );
+        map.insert(
+            "commitment_tree_root".to_string(),
+            Array(res.commitment_tree_root).into(),
+        );
         InputValue::Struct(map)
     }
 }
 
 /// Public information of created resources.
-#[derive(Clone, Copy, Default, Debug, Ord, PartialOrd, Eq, PartialEq, Hash, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Default,
+    Debug,
+    Ord,
+    PartialOrd,
+    Eq,
+    PartialEq,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct CreatedResourcePublic {
     /// The commitment to the created [Resource].
     pub resource_commitment: [u8; DIGEST_BYTES],
@@ -691,8 +825,14 @@ impl From<CreatedResourcePublic> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: CreatedResourcePublic) -> Self {
         let mut map = InputMap::new();
-        map.insert("resource_commitment".to_string(), Array(res.resource_commitment).into());
-        map.insert("resource_logic_ref".to_string(), Array(res.resource_logic_ref).into());
+        map.insert(
+            "resource_commitment".to_string(),
+            Array(res.resource_commitment).into(),
+        );
+        map.insert(
+            "resource_logic_ref".to_string(),
+            Array(res.resource_logic_ref).into(),
+        );
         InputValue::Struct(map)
     }
 }
@@ -718,12 +858,18 @@ impl EmbeddedCurvePoint {
         let generator = ark_grumpkin::Affine::generator();
         let generator_x = FieldElement::from_repr(generator.x().unwrap());
         let generator_y = FieldElement::from_repr(generator.y().unwrap());
-        Self { x: generator_x, y: generator_y }
+        Self {
+            x: generator_x,
+            y: generator_y,
+        }
     }
 
     /// Returns the null element of the curve; 'the point at infinity'
     pub fn point_at_infinity() -> Self {
-        EmbeddedCurvePoint { x: FieldElement::zero(), y: FieldElement::zero() }
+        EmbeddedCurvePoint {
+            x: FieldElement::zero(),
+            y: FieldElement::zero(),
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 64] {
@@ -757,7 +903,10 @@ impl Neg for EmbeddedCurvePoint {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        Self { x: self.x, y: -self.y }
+        Self {
+            x: self.x,
+            y: -self.y,
+        }
     }
 }
 
@@ -779,7 +928,10 @@ impl From<EmbeddedCurvePoint> for ark_grumpkin::Affine {
 
 impl From<ark_grumpkin::Affine> for EmbeddedCurvePoint {
     fn from(point: ark_grumpkin::Affine) -> Self {
-        Self { x: FieldElement::from_repr(point.x), y: FieldElement::from_repr(point.y) }
+        Self {
+            x: FieldElement::from_repr(point.x),
+            y: FieldElement::from_repr(point.y),
+        }
     }
 }
 
@@ -789,13 +941,13 @@ impl Mul<EmbeddedCurveScalar> for EmbeddedCurvePoint {
     fn mul(self, scalar: EmbeddedCurveScalar) -> Self::Output {
         // 1. Convert the point to ark_grumpkin::Affine
         let affine_point: ark_grumpkin::Affine = self.into();
-        
+
         // 2. Convert the scalar to ark_grumpkin::Fr
         let fr_scalar: ark_grumpkin::Fr = scalar.into();
-        
+
         // 3. Perform the scalar multiplication (returns a Projective point)
         let projective_result = affine_point * fr_scalar;
-        
+
         // 4. Convert back to Affine, and then to our custom EmbeddedCurvePoint
         projective_result.into_affine().into()
     }
@@ -818,10 +970,32 @@ impl From<ComplianceInstance> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: ComplianceInstance) -> Self {
         let mut map = InputMap::new();
-        map.insert("consumed_publics".to_string(), InputValue::Vec(res.consumed_publics.into_iter().map(InputValue::from).collect()));
-        map.insert("consumed_count".to_string(), InputValue::Field(res.consumed_count.into()));
-        map.insert("created_publics".to_string(), InputValue::Vec(res.created_publics.into_iter().map(InputValue::from).collect()));
-        map.insert("created_count".to_string(), InputValue::Field(res.created_count.into()));
+        map.insert(
+            "consumed_publics".to_string(),
+            InputValue::Vec(
+                res.consumed_publics
+                    .into_iter()
+                    .map(InputValue::from)
+                    .collect(),
+            ),
+        );
+        map.insert(
+            "consumed_count".to_string(),
+            InputValue::Field(res.consumed_count.into()),
+        );
+        map.insert(
+            "created_publics".to_string(),
+            InputValue::Vec(
+                res.created_publics
+                    .into_iter()
+                    .map(InputValue::from)
+                    .collect(),
+            ),
+        );
+        map.insert(
+            "created_count".to_string(),
+            InputValue::Field(res.created_count.into()),
+        );
         map.insert("delta".to_string(), res.delta.into());
         InputValue::Struct(map)
     }
@@ -836,7 +1010,11 @@ impl ComplianceInstance {
         for consumed_public in self.consumed_publics {
             write_bytes(&mut buf, &mut buf_len, &consumed_public.resource_nullifier);
             write_bytes(&mut buf, &mut buf_len, &consumed_public.resource_logic_ref);
-            write_bytes(&mut buf, &mut buf_len, &consumed_public.commitment_tree_root);
+            write_bytes(
+                &mut buf,
+                &mut buf_len,
+                &consumed_public.commitment_tree_root,
+            );
         }
 
         let created_count_bytes = u32::from(self.created_count).to_le_bytes();
@@ -849,8 +1027,11 @@ impl ComplianceInstance {
         assert!(!self.delta.is_infinite());
         write_bytes(&mut buf, &mut buf_len, &self.delta.x.to_le_bytes());
         write_bytes(&mut buf, &mut buf_len, &self.delta.y.to_le_bytes());
-        
-        assert_eq!(buf_len, MAX_COMPLIANCE_DIGEST_BUF_LEN, "compliance instance digest pre-image malformed");
+
+        assert_eq!(
+            buf_len, MAX_COMPLIANCE_DIGEST_BUF_LEN,
+            "compliance instance digest pre-image malformed"
+        );
         FieldElement::from_le_bytes_reduce(keccak256(buf).as_slice())
     }
 }
@@ -909,7 +1090,10 @@ impl EmbeddedCurveScalar {
     }
     /// Zero scalar
     pub fn zero() -> Self {
-        Self { lo: FieldElement::zero(), hi: FieldElement::zero() }
+        Self {
+            lo: FieldElement::zero(),
+            hi: FieldElement::zero(),
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
@@ -946,11 +1130,36 @@ impl From<ComplianceWitness> for InputValue {
     /// Convert the serializable proof struct into an InputMap for the ABI.
     fn from(res: ComplianceWitness) -> Self {
         let mut map = InputMap::new();
-        map.insert("consumed_data".to_string(), InputValue::Vec(res.consumed_data.into_iter().map(InputValue::from).collect()));
-        map.insert("consumed_count".to_string(), InputValue::Field(res.consumed_count.into()));
-        map.insert("created_resources".to_string(), InputValue::Vec(res.created_resources.into_iter().map(InputValue::from).collect()));
-        map.insert("created_count".to_string(), InputValue::Field(res.created_count.into()));
-        map.insert("ephemeral_root".to_string(), Array(res.ephemeral_root).into());
+        map.insert(
+            "consumed_data".to_string(),
+            InputValue::Vec(
+                res.consumed_data
+                    .into_iter()
+                    .map(InputValue::from)
+                    .collect(),
+            ),
+        );
+        map.insert(
+            "consumed_count".to_string(),
+            InputValue::Field(res.consumed_count.into()),
+        );
+        map.insert(
+            "created_resources".to_string(),
+            InputValue::Vec(
+                res.created_resources
+                    .into_iter()
+                    .map(InputValue::from)
+                    .collect(),
+            ),
+        );
+        map.insert(
+            "created_count".to_string(),
+            InputValue::Field(res.created_count.into()),
+        );
+        map.insert(
+            "ephemeral_root".to_string(),
+            Array(res.ephemeral_root).into(),
+        );
         map.insert("rcv".to_string(), res.rcv.into());
         InputValue::Struct(map)
     }
@@ -1026,16 +1235,28 @@ impl ResourceLogicInstance {
         write_bytes(&mut buf, &mut buf_len, &[self.is_consumed as u8]);
 
         let lists = [
-            (self.app_data.resource_payload, self.app_data.resource_payload_len),
-            (self.app_data.application_payload, self.app_data.application_payload_len),
-            (self.app_data.external_payload, self.app_data.external_payload_len),
-            (self.app_data.discovery_payload, self.app_data.discovery_payload_len),
+            (
+                self.app_data.resource_payload,
+                self.app_data.resource_payload_len,
+            ),
+            (
+                self.app_data.application_payload,
+                self.app_data.application_payload_len,
+            ),
+            (
+                self.app_data.external_payload,
+                self.app_data.external_payload_len,
+            ),
+            (
+                self.app_data.discovery_payload,
+                self.app_data.discovery_payload_len,
+            ),
         ];
 
         for list_idx in 0..4 {
             let list = lists[list_idx].0;
             let list_len = lists[list_idx].1;
-            
+
             let len_bytes = u32::from(list_len).to_le_bytes();
             write_bytes(&mut buf, &mut buf_len, &len_bytes);
 
@@ -1047,7 +1268,10 @@ impl ResourceLogicInstance {
                 write_bytes(&mut buf, &mut buf_len, &[p.deletion_criterion as u8]);
             }
         }
-        assert_eq!(buf_len, MAX_LOGIC_DIGEST_BUF_LEN, "logic instance digest pre-image malformed");
+        assert_eq!(
+            buf_len, MAX_LOGIC_DIGEST_BUF_LEN,
+            "logic instance digest pre-image malformed"
+        );
         FieldElement::from_le_bytes_reduce(keccak256(buf).as_slice())
     }
 }
@@ -1108,11 +1332,11 @@ pub fn encode_forwarder_calldata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use barretenberg_rs::backends::FfiBackend;
     use barretenberg_rs::BarretenbergApi;
+    use barretenberg_rs::backends::FfiBackend;
     use nodes::BarretenbergCircuit;
     use nodes::init_srs;
+    use std::path::PathBuf;
 
     #[test]
     fn test_transfer_auth_witness() {
@@ -1127,18 +1351,20 @@ mod tests {
             }),
             value_info: Some(ValueInfo {
                 auth_pk: [
-                    0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
-                    0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17,
-                    0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08,
-                    0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8,
+                    0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95,
+                    0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59,
+                    0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3,
+                    0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8, 0xfd, 0x17, 0xb4,
+                    0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8,
                 ],
                 encryption_pk: EmbeddedCurvePoint::point_at_infinity(),
             }),
             auth_sig: Some([
-                0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
-                0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
-                0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
-                0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+                0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+                0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+                0x16, 0xf8, 0x17, 0x98, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0,
+                0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9,
+                0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
             ]),
             encryption_info: None,
             forwarder_info: None,
@@ -1147,14 +1373,14 @@ mod tests {
                 logic_ref: [0; DIGEST_BYTES],
                 label_ref: [0; DIGEST_BYTES],
                 value_ref: [
-                    120, 48, 20, 171, 173, 225, 227, 235, 42, 220, 68, 51, 122, 237, 236, 0,
-                    205, 27, 59, 211, 7, 187, 103, 8, 125, 74, 218, 229, 16, 191, 110, 218,
+                    120, 48, 20, 171, 173, 225, 227, 235, 42, 220, 68, 51, 122, 237, 236, 0, 205,
+                    27, 59, 211, 7, 187, 103, 8, 125, 74, 218, 229, 16, 191, 110, 218,
                 ],
                 quantity: 0,
                 nonce: [0; DIGEST_BYTES],
                 nk_commitment: [
-                    41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200,
-                    75, 166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99,
+                    41, 13, 236, 217, 84, 139, 98, 168, 214, 3, 69, 169, 136, 56, 111, 200, 75,
+                    166, 188, 149, 72, 64, 8, 246, 54, 47, 147, 22, 14, 243, 229, 99,
                 ],
                 is_ephemeral: false,
                 rand_seed: [0; DIGEST_BYTES],
@@ -1173,7 +1399,9 @@ mod tests {
         let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
         // Compute the proof from the witness bytes
         let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-        let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+        let verify_response = circuit
+            .circuit_verify(&mut api, prove_response.clone())
+            .unwrap();
         assert!(verify_response.verified);
     }
 
@@ -1213,12 +1441,12 @@ mod tests {
             value_ref: [4; DIGEST_BYTES],
             quantity: 100,
             nonce: [
-                252, 148, 204, 243, 140, 31, 54, 179, 170, 17, 251, 240, 6, 82, 245, 232,
-                123, 157, 28, 182, 32, 87, 2, 87, 35, 189, 171, 90, 51, 95, 107, 183,
+                252, 148, 204, 243, 140, 31, 54, 179, 170, 17, 251, 240, 6, 82, 245, 232, 123, 157,
+                28, 182, 32, 87, 2, 87, 35, 189, 171, 90, 51, 95, 107, 183,
             ],
             nk_commitment: [
-                206, 188, 136, 130, 254, 203, 236, 127, 184, 13, 44, 244, 179, 18, 190, 192,
-                24, 136, 76, 45, 102, 102, 124, 103, 169, 5, 8, 33, 75, 216, 186, 252,
+                206, 188, 136, 130, 254, 203, 236, 127, 184, 13, 44, 244, 179, 18, 190, 192, 24,
+                136, 76, 45, 102, 102, 124, 103, 169, 5, 8, 33, 75, 216, 186, 252,
             ],
             is_ephemeral: false,
             rand_seed: [7; DIGEST_BYTES],
@@ -1259,7 +1487,9 @@ mod tests {
         let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
         // Compute the proof from the witness bytes
         let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-        let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+        let verify_response = circuit
+            .circuit_verify(&mut api, prove_response.clone())
+            .unwrap();
         assert!(verify_response.verified);
     }
 
@@ -1268,8 +1498,14 @@ mod tests {
         // Initialize the structured reference string
         init_srs();
         let public_key = EmbeddedCurvePoint {
-            x: FieldElement::try_from_str("0x2c39bbbde2d0ffcb5c4317dcbfa1771cf554a2f33c647446632fa707a5bf5f3f").unwrap(),
-            y: FieldElement::try_from_str("0x2b9c81935298af5ebe22f1a7279bb76781e6cadba3fb6c5c41ed942392dc687c").unwrap(),
+            x: FieldElement::try_from_str(
+                "0x2c39bbbde2d0ffcb5c4317dcbfa1771cf554a2f33c647446632fa707a5bf5f3f",
+            )
+            .unwrap(),
+            y: FieldElement::try_from_str(
+                "0x2b9c81935298af5ebe22f1a7279bb76781e6cadba3fb6c5c41ed942392dc687c",
+            )
+            .unwrap(),
         };
         let sig_s = EmbeddedCurveScalar {
             lo: FieldElement::try_from_str("0x5fd1ac0ad411110674830c54cb506212").unwrap(),
@@ -1284,7 +1520,10 @@ mod tests {
         let mut input_map = InputMap::new();
         input_map.insert("public_key".to_string(), public_key.into());
         input_map.insert("message".to_string(), InputValue::Field(message));
-        input_map.insert("signature".to_string(), InputValue::Vec(vec![sig_s.into(), sig_e.into()]));
+        input_map.insert(
+            "signature".to_string(),
+            InputValue::Vec(vec![sig_s.into(), sig_e.into()]),
+        );
         // Load up the aggregation circuit from disk
         let program_artifact_path = PathBuf::from(DELTA_VERIFY_CIRCUIT_PATH);
         // Use the FFI backend which links directly to static libraries
@@ -1295,7 +1534,9 @@ mod tests {
         let mut circuit = BarretenbergCircuit::new(&mut api, program_artifact_path);
         // Compute the proof from the witness bytes
         let prove_response = circuit.circuit_prove(&mut api, input_map).unwrap();
-        let verify_response = circuit.circuit_verify(&mut api, prove_response.clone()).unwrap();
+        let verify_response = circuit
+            .circuit_verify(&mut api, prove_response.clone())
+            .unwrap();
         assert!(verify_response.verified);
     }
 }
