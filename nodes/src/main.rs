@@ -336,19 +336,18 @@ fn handle_wallet(cli: WalletCommands) -> Result<(), std::io::Error> {
 // Handle client subcommands
 fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let wallet_path = Path::new("wallet.toml");
-    let pool_state_path = Path::new("pool_state.bin");
     // Use the FFI backend which links directly to static libraries
     let backend = FfiBackend::new().unwrap();
     // Initialize the Barretenberg API
     let mut api = BarretenbergApi::new(backend);
-    // Load up the transfer authorization circuit from disk
-    let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
-    let logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
     // Attempt to load the wallet, or default to empty if it doesn't exist
     let store = Store::load(wallet_path).unwrap_or_default();
     let mut rng = rand::thread_rng();
     match cli {
         ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
+            // Load up the transfer authorization circuit from disk
+            let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
+            let logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
             // The state of the shielded pool
             let mut shielded_pool = if let Ok(state_bytes) = std::fs::read(&pool) {
                 ShieldedPool::try_from_slice(&state_bytes)?
@@ -466,7 +465,44 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
             let state_bytes = borsh::to_vec(&shielded_pool)?;
             std::fs::write(&pool, state_bytes)?;
         },
-        ClientCommands::Balance { rpc, pool, signer, owner } => {},
+        ClientCommands::Balance { rpc, pool, signer, owner } => {
+            // The state of the shielded pool
+            let shielded_pool = if let Ok(state_bytes) = std::fs::read(&pool) {
+                ShieldedPool::try_from_slice(&state_bytes)?
+            } else {
+                ShieldedPool::new(&mut api)
+            };
+            // Add transaction inputs
+            if let Ok(vk) = store.evaluate_viewing_key(&owner) {
+                let mut value_acc = HashMap::<_, u128>::new();
+                // First synchronize the client state
+                let client_state = ClientState::synchronize(&mut api, shielded_pool.clone(), &[vk.clone()]);
+                if let Some(note_positions) = client_state.pos_map.get(&vk) {
+                    for pos in note_positions {
+                        // Only consider notes that have not yet been spent
+                        if !client_state.spent_notes.contains(pos) {
+                            // Get the note
+                            let note = client_state.note_map.get(pos).expect("Missing note");
+                            // Accumulate the value of this note
+                            *value_acc.entry(&note.erc20_token_addr).or_default() += note.resource.quantity;
+                        }
+                    }
+                }
+                // Finally display the accumulation
+                if value_acc.len() > 0 {
+                    for (token, quantity) in value_acc {
+                        println!("{}: {}", Address::from_slice(token), quantity);
+                    }
+                } else {
+                    println!("No balance");
+                }
+            } else if let Ok(_) = store.evaluate_address(&owner) {
+                // All transparent addresses are assumed to have infinite balances
+                println!("Infinite balance");
+            } else {
+                panic!("unable to find from alias");
+            }
+        },
     }
     Ok(())
 }
