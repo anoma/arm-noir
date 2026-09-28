@@ -136,20 +136,20 @@ enum ClientCommands {
         #[arg(long)]
         signer: Option<String>,
     },
-    /// Permit the Permit2 smart contract to spend the signer's tokens
-    Approve {
+    /// Check the balance that a given key or address has
+    Balance {
         /// URL of Ethereum RPC to connect to
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         rpc: String,
-        /// Address of the Permit2 contract
+        /// The shielded pool to submit transaction to
         #[arg(long)]
-        spender: String,
-        /// The address authorizing its tokens to be spent
+        pool: String,
+        /// The Ethereum private key that signs the transaction. Defaults to owner.
         #[arg(long)]
-        signer: String,
-        /// The ERC20 token whose spending is being authorized
+        signer: Option<String>,
+        /// The key or address to check the balance of
         #[arg(long)]
-        token: String,
+        owner: String,
     },
 }
 
@@ -341,22 +341,22 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
     let backend = FfiBackend::new().unwrap();
     // Initialize the Barretenberg API
     let mut api = BarretenbergApi::new(backend);
-    // The state of the shielded pool
-    let mut shielded_pool = if let Ok(state_bytes) = std::fs::read(pool_state_path) {
-        ShieldedPool::try_from_slice(&state_bytes)?
-    } else {
-        ShieldedPool::new(&mut api)
-    };
     // Load up the transfer authorization circuit from disk
     let logic_program_artifact_path = PathBuf::from(TRANSFER_AUTH_CIRCUIT_PATH);
     let logic_circuit = BarretenbergCircuit::new(&mut api, logic_program_artifact_path);
-    // Register the transfer authorization circuit with the shielded pool
-    shielded_pool.register_logic(logic_circuit);
     // Attempt to load the wallet, or default to empty if it doesn't exist
     let store = Store::load(wallet_path).unwrap_or_default();
     let mut rng = rand::thread_rng();
     match cli {
         ClientCommands::Transfer { rpc, from, to, token, amount, pool, signer } => {
+            // The state of the shielded pool
+            let mut shielded_pool = if let Ok(state_bytes) = std::fs::read(&pool) {
+                ShieldedPool::try_from_slice(&state_bytes)?
+            } else {
+                ShieldedPool::new(&mut api)
+            };
+            // Register the transfer authorization circuit with the shielded pool
+            shielded_pool.register_logic(logic_circuit);
             let mut builder = TransactionBuilder::new(&mut api);
             // The resource logic reference is the UltraHonk verification key hash
             let logic_ref = builder.logic_circuit
@@ -464,9 +464,9 @@ fn handle_client(cli: ClientCommands) -> Result<(), std::io::Error> {
                 .expect("Transaction validation failed");
             // Save the updated state
             let state_bytes = borsh::to_vec(&shielded_pool)?;
-            std::fs::write(pool_state_path, state_bytes)?;
+            std::fs::write(&pool, state_bytes)?;
         },
-        ClientCommands::Approve { rpc, spender, signer, token } => {},
+        ClientCommands::Balance { rpc, pool, signer, owner } => {},
     }
     Ok(())
 }
